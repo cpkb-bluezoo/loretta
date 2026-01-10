@@ -1,0 +1,250 @@
+LORETTA TODO
+============
+
+This file tracks the current development status and planned work.
+
+
+COMPLETED
+---------
+
+[x] Lexer (lexer.c)
+    - Feedforward style tokenizer
+    - Python indentation handling (INDENT/DEDENT tokens)
+    - Implicit line continuation inside (), [], {}
+    - All Python 3 token types
+    - String literals with escape sequences
+    - Numeric literals (int, float, hex, octal, binary, imaginary)
+    - Keywords and soft keywords (match, case, type)
+
+[x] Parser skeleton (parser.c)
+    - Recursive descent parser
+    - AST node types matching Python's official AST spec
+    - Basic statement parsing (def, class, if, while, for, import, etc.)
+    - Binary operator precedence via Pratt parsing
+    - Comparison chains (a < b < c)
+    - Boolean operators (and, or) with correct precedence
+    - All comparison operators including is/is not/in/not in
+    - Conditional expressions (x if cond else y)
+    - Lambda expressions (lambda x, y: x + y)
+    - Augmented assignment (+=, -=, *=, etc.)
+    - Chained assignment (a = b = c = value)
+    - Slice parsing (a[1:2:3], a[:], a[::2], etc.)
+    - List/set/dict/generator comprehensions with multiple for/if clauses
+    - Set literals ({1, 2, 3})
+    - Tuple literals ((1, 2, 3))
+    - Function arguments (positional, keyword, defaults, *args, **kwargs)
+    - Decorators (@decorator, @decorator(args))
+    - Starred expressions in calls (*args, **kwargs)
+    - Keyword arguments in calls (name=value)
+    - Yield and yield from expressions
+    - Await expressions
+    - Async function definitions
+    - Walrus operator (:=)
+    - Class definitions with base classes
+    - try/except/finally statements with multiple handlers
+    - with statements (context managers)
+    - raise statements (with optional from clause)
+    - assert statements
+    - del statements
+    - global and nonlocal declarations
+    - Tuple unpacking in assignments (a, b = pair)
+    - Starred expressions in unpacking (*rest, a = items)
+    - Match/case statements (Python 3.10+ structural pattern matching)
+    - Pattern types: literals, captures, wildcards, sequences, mappings, classes, or, as
+    - f-strings parsed as strings (full interpolation would require lexer changes)
+
+[x] Semantic analyzer skeleton (analyze.c)
+    - Scope and symbol table construction
+    - Basic name resolution
+    - Symbol kinds (variable, parameter, function, class, global, nonlocal)
+
+[x] Class file writer (classwriter.c)
+    - JVM class file structure (magic, version, access flags)
+    - Fields, methods, and attributes
+    - Bootstrap methods attribute for invokedynamic
+    - NOTE: StackMapTable attribute needed for code with branches (Java 7+)
+
+[x] Constant pool builder (constpool.c)
+    - All constant pool entry types
+    - String deduplication
+    - Method and field references
+
+[x] invokedynamic infrastructure (indy.h, indy.c)
+    - Call site types for Python operations
+    - Bootstrap method registration
+    - Short runtime class names ($O, $I, $S, etc.) for compact bytecode
+
+
+IN PROGRESS - Compiler
+----------------------
+
+[x] Expression code generation (basic)
+    - Literal values (int, float, string, bool, None)
+    - Name lookup (local variables)
+    - Binary operations via invokedynamic
+    - Unary operations via invokedynamic
+    - Comparisons via invokedynamic
+    - Boolean operators (and, or) with short-circuit
+    - Attribute access via invokedynamic
+    - Subscript access via invokedynamic
+    - Function calls via invokedynamic
+    - Collection literals (list, tuple, dict)
+    - Conditional expressions (a if test else b)
+
+[x] Statement code generation (basic)
+    - Expression statements
+    - Assignment (simple and augmented)
+    - if/elif/else
+    - while loops
+    - for loops (iterator protocol)
+    - Return statements
+    - break/continue
+    - pass
+
+[x] Globals and built-ins ($G)
+    - Global namespace class
+    - Built-in lookup via $G.builtin()
+    - Module-level variable storage
+
+[ ] Expression code generation (remaining)
+    - Name lookup (free variables/closures)
+    - Comparison chains (a < b < c)
+    - Method calls
+    - Set literals
+    - Comprehensions
+    - Lambda expressions
+    - Slice objects
+
+[ ] Statement code generation (remaining)
+    - Function definitions
+    - Class definitions
+    - try/except/finally
+    - raise
+    - with statement (context managers)
+    - import/from import
+    - assert
+    - del
+    - global/nonlocal declarations
+
+[ ] StackMapTable generation
+    - Required for bytecode verification (Java 7+)
+    - Compute stack/local types at branch targets
+    - Frame type inference
+    - Currently using -noverify to test generated code
+
+[ ] Closure support
+    - Free variable detection
+    - Cell variable detection
+    - Closure class generation
+    - Nested function compilation
+
+
+IN PROGRESS - Runtime Library (Java)
+------------------------------------
+
+Runtime classes use short $-prefixed names for compact bytecode.
+Located in runtime/src/, compiled to runtime/classes/.
+
+[x] Core types (implemented)
+    - $O  (PyObject)   - Base class for all Python objects
+    - $Y  (PyType)     - Type/class objects (placeholder)
+    - $N  (PyNone)     - Singleton None
+    - $B  (PyBool)     - Boolean (True, False)
+    - $I  (PyInt)      - Arbitrary precision integer (long + BigInteger)
+    - $F  (PyFloat)    - Double-precision float
+    - $S  (PyStr)      - Unicode strings
+    - $L  (PyList)     - Mutable sequences
+    - $T  (PyTuple)    - Immutable sequences
+    - $D  (PyDict)     - Dictionaries (insertion-ordered)
+    - $X  (PyException)- Runtime exceptions
+
+[x] Bootstrap methods ($BS) - implemented
+    - binop: binary operations (__add__, __sub__, etc.)
+    - unaryop: unary operations (__neg__, __pos__, etc.)
+    - compare: comparison operations (__lt__, __eq__, etc.)
+    - getattr/setattr/delattr: attribute access
+    - getitem/setitem/delitem: subscript access
+    - call: function calls
+    - iter/next: iteration protocol
+    - contains: membership test
+    - builtin: bool conversion for branching
+
+[x] Built-in functions ($FN and $G)
+    - I/O: print, input
+    - Types: int, float, str, bool, list, tuple, dict, set
+    - Type introspection: type, isinstance, callable
+    - Math: abs, min, max, sum, pow, round, divmod
+    - Sequences: len, range, enumerate, zip, map, filter, sorted, reversed
+    - Iteration: iter, next
+    - Logic: all, any
+    - String/char: repr, ord, chr, hex, oct, bin
+    - Object: hash, id, getattr, setattr, hasattr, delattr
+
+[ ] Remaining types
+    - $C  (PyComplex)  - Complex numbers
+    - $BY (PyBytes)    - Byte sequences
+    - $ST (PySet)      - Mutable sets
+    - $FS (PyFrozenSet) - Immutable sets
+
+[ ] Remaining built-in functions
+    - issubclass
+    - open, read, write (file I/O)
+    - dir, vars, globals, locals
+    - exec, eval, compile
+    - format, ascii
+    - slice, memoryview, bytearray
+    - object, super
+    - staticmethod, classmethod, property
+
+[ ] Exception types (need proper hierarchy)
+    - BaseException, Exception
+    - TypeError, ValueError, AttributeError
+    - NameError, IndexError, KeyError
+    - StopIteration, GeneratorExit
+
+
+PLANNED - Module System
+-----------------------
+
+[ ] Import machinery
+    - Module compilation units
+    - Package support (__init__.py)
+    - Relative imports
+    - Import hooks
+    - sys.path handling
+
+[ ] Standard library support
+    - Pure Python modules (copy from CPython)
+    - Java interop wrappers for common functionality
+
+
+FUTURE CONSIDERATIONS
+---------------------
+
+[ ] Optimizations
+    - Specialized bytecode for common patterns
+    - Type inference for local variables
+    - Inline caching warmup
+    - Dead code elimination
+
+[ ] Python compatibility
+    - __slots__
+    - Metaclasses
+    - Descriptors (property, classmethod, staticmethod)
+    - Multiple inheritance with C3 MRO
+    - __getattr__/__setattr__/__delattr__
+    - Context managers (__enter__/__exit__)
+    - Iterators and generators
+    - Async/await and coroutines
+
+[ ] Java interop
+    - Calling Java methods from Python
+    - Implementing Java interfaces
+    - Java collection wrappers
+    - Exception bridging
+
+[ ] Tooling
+    - Source maps for debugging
+    - REPL
+    - Package manager integration
+

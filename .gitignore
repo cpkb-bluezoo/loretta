@@ -1,0 +1,16 @@
+# Build artifacts
+*.o
+loretta
+*~
+
+# Java class files
+*.class
+
+# Test build output
+test/build/
+/tmp/
+
+# Editor files
+*.dSYM/
+.DS_Store
+
