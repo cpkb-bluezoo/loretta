@@ -263,6 +263,19 @@ const char *indy_cmpop_name(py_indy_op_t op);
 #define LRT_ITERATOR    "$IT"
 #define LRT_GENERATOR   "$GN"
 
+/* Slice */
+#define LRT_SLICE       "$SL"
+
+/* Generator expression */
+#define LRT_GENEXP      "$GE"
+
+/* Class and instance */
+#define LRT_CLASS       "$Cls"
+#define LRT_INSTANCE    "$Inst"
+
+/* Module */
+#define LRT_MODULE      "$Mod"
+
 /* Common descriptors */
 #define DESC_OBJECT     "L" LRT_OBJECT ";"
 #define DESC_OBJECT_ARR "[" DESC_OBJECT
@@ -272,6 +285,7 @@ const char *indy_cmpop_name(py_indy_op_t op);
 #define DESC_LIST       "L" LRT_LIST ";"
 #define DESC_DICT       "L" LRT_DICT ";"
 #define DESC_TUPLE      "L" LRT_TUPLE ";"
+#define DESC_SET        "L" LRT_SET ";"
 #define DESC_NONE       "L" LRT_NONE ";"
 
 #endif /* INDY_H */

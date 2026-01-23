@@ -49,6 +49,11 @@ static void attribute_free(attribute_t *attr)
             free(attr->data.bootstrap.methods);
             break;
 
+        case ATTR_STACK_MAP_TABLE:
+            /* StackMapTable uses the raw data union */
+            free(attr->data.raw.data);
+            break;
+
         case ATTR_RAW:
             free(attr->data.raw.data);
             break;
@@ -140,6 +145,29 @@ void code_attr_add_line_number(attribute_t *attr, const_pool_t *cp,
     entry->start_pc = pc;
     entry->line_number = line;
     lnt->data.line_numbers.entries = slist_append(lnt->data.line_numbers.entries, entry);
+}
+
+void code_attr_set_stack_map_table(attribute_t *attr, const_pool_t *cp,
+                                    uint8_t *data, uint32_t length)
+{
+    if (!attr || attr->type != ATTR_CODE || !data || length == 0) {
+        free(data);
+        return;
+    }
+
+    /* Create StackMapTable attribute */
+    attribute_t *smt = calloc(1, sizeof(attribute_t));
+    if (!smt) {
+        free(data);
+        return;
+    }
+
+    smt->type = ATTR_STACK_MAP_TABLE;
+    smt->name_index = cp_add_utf8(cp, "StackMapTable");
+    smt->data.raw.data = data;
+    smt->data.raw.length = length;
+
+    attr->data.code.attributes = slist_append(attr->data.code.attributes, smt);
 }
 
 /* ========================================================================
@@ -481,6 +509,11 @@ static void write_attribute(bytebuf_t *buf, attribute_t *attr)
 
         case ATTR_SOURCE_FILE:
             bytebuf_write_u16(buf, attr->data.source_file.sourcefile_index);
+            break;
+
+        case ATTR_STACK_MAP_TABLE:
+            /* StackMapTable uses the raw data union */
+            bytebuf_write_bytes(buf, attr->data.raw.data, attr->data.raw.length);
             break;
 
         case ATTR_RAW:

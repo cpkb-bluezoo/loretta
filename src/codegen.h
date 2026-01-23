@@ -26,6 +26,7 @@
 #include "constpool.h"
 #include "classwriter.h"
 #include "indy.h"
+#include "stackmap.h"
 
 /* ========================================================================
  * JVM Bytecode Instructions
@@ -290,7 +291,9 @@ typedef struct local_var
 /**
  * Code generation context for a single method/function.
  */
-typedef struct codegen_ctx
+typedef struct codegen_ctx codegen_ctx_t;
+
+struct codegen_ctx
 {
     class_writer_t *cw;             /* Class being generated */
     method_info_t *method;          /* Current method */
@@ -304,6 +307,19 @@ typedef struct codegen_ctx
     hashtable_t *locals;            /* name -> local_var_t* */
     int next_local;                 /* Next local slot */
     int max_locals;                 /* Maximum locals seen */
+
+    /* Closure support */
+    codegen_ctx_t *parent_ctx;      /* Enclosing function context (for closures) */
+    slist_t *captured_vars;         /* List of captured variable names (char*) */
+    int closure_slot;               /* Local slot for closure array (-1 if none) */
+
+    /* Class context (when compiling methods inside a class) */
+    const char *current_class_name; /* Non-null when inside a class definition */
+
+    /* Global/nonlocal declarations */
+    slist_t *global_names;          /* Names declared global */
+    slist_t *nonlocal_names;        /* Names declared nonlocal */
+    bool is_module_level;           /* True when generating module-level code */
 
     /* Stack tracking */
     int stack_depth;                /* Current stack depth */
@@ -323,9 +339,12 @@ typedef struct codegen_ctx
     /* Scope reference for symbol lookup */
     scope_t *scope;
 
+    /* StackMapTable for verification (Java 7+) */
+    stack_map_table_t *stackmap;
+
     /* Error handling */
     char *error_msg;
-} codegen_ctx_t;
+};
 
 /**
  * Loop context for break/continue.

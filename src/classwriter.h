@@ -274,5 +274,12 @@ void code_attr_add_exception(attribute_t *attr, uint16_t start_pc,
 void code_attr_add_line_number(attribute_t *attr, const_pool_t *cp,
                                 uint16_t pc, uint16_t line);
 
+/**
+ * Set the StackMapTable attribute on a Code attribute.
+ * Takes ownership of the data buffer.
+ */
+void code_attr_set_stack_map_table(attribute_t *attr, const_pool_t *cp,
+                                    uint8_t *data, uint32_t length);
+
 #endif /* CLASSWRITER_H */
 

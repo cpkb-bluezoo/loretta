@@ -1,5 +1,5 @@
 /*
- * analyze.c
+ * semantic.c
  * Semantic analysis - scope and symbol resolution
  * Copyright (C) 2026 Chris Burdess <dog@bluezoo.org>
  *

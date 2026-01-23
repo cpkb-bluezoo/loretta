@@ -1611,6 +1611,91 @@ static ast_node_t *parse_simple_stmt(parser_t *parser)
         return node;
     }
 
+    if (parser_match(parser, TOK_FROM)) {
+        /* from module import names */
+        ast_node_t *node = ast_new(AST_IMPORT_FROM, line, column);
+        node->data.import_from.module = NULL;
+        node->data.import_from.names = NULL;
+        node->data.import_from.level = 0;
+
+        /* Handle relative imports (leading dots) */
+        while (parser_match(parser, TOK_DOT)) {
+            node->data.import_from.level++;
+        }
+
+        /* Module name (may be absent for relative imports like "from . import x") */
+        if (parser_check(parser, TOK_IDENTIFIER)) {
+            char *mod_name = str_dup(lexer_text(parser->lexer));
+            lexer_advance(parser->lexer);
+
+            /* Handle dotted module names */
+            while (parser_match(parser, TOK_DOT)) {
+                if (!parser_check(parser, TOK_IDENTIFIER)) {
+                    parser_error(parser, "Expected identifier after '.'");
+                    free(mod_name);
+                    return node;
+                }
+                char *new_name = str_concat(mod_name, ".", lexer_text(parser->lexer), NULL);
+                free(mod_name);
+                mod_name = new_name;
+                lexer_advance(parser->lexer);
+            }
+            node->data.import_from.module = mod_name;
+        }
+
+        /* Expect 'import' */
+        if (!parser_match(parser, TOK_IMPORT)) {
+            parser_error(parser, "Expected 'import' in from statement");
+            return node;
+        }
+
+        /* Check for 'from x import *' */
+        if (parser_match(parser, TOK_STAR)) {
+            ast_node_t *alias = ast_new(AST_ALIAS, lexer_line(parser->lexer),
+                                        lexer_column(parser->lexer));
+            alias->data.alias.name = str_dup("*");
+            alias->data.alias.asname = NULL;
+            node->data.import_from.names = slist_append(node->data.import_from.names, alias);
+            return node;
+        }
+
+        /* Check for parenthesized imports: from x import (a, b, c) */
+        bool paren = parser_match(parser, TOK_LPAREN);
+
+        /* Parse import names */
+        do {
+            if (!parser_check(parser, TOK_IDENTIFIER)) {
+                parser_error(parser, "Expected identifier in import");
+                break;
+            }
+
+            ast_node_t *alias = ast_new(AST_ALIAS, lexer_line(parser->lexer),
+                                        lexer_column(parser->lexer));
+            alias->data.alias.name = str_dup(lexer_text(parser->lexer));
+            alias->data.alias.asname = NULL;
+            lexer_advance(parser->lexer);
+
+            if (parser_match(parser, TOK_AS)) {
+                if (!parser_check(parser, TOK_IDENTIFIER)) {
+                    parser_error(parser, "Expected identifier after 'as'");
+                    break;
+                }
+                alias->data.alias.asname = str_dup(lexer_text(parser->lexer));
+                lexer_advance(parser->lexer);
+            }
+
+            node->data.import_from.names = slist_append(node->data.import_from.names, alias);
+        } while (parser_match(parser, TOK_COMMA));
+
+        if (paren) {
+            if (!parser_match(parser, TOK_RPAREN)) {
+                parser_error(parser, "Expected ')' after import list");
+            }
+        }
+
+        return node;
+    }
+
     if (parser_match(parser, TOK_RAISE)) {
         /* raise [exc [from cause]] */
         ast_node_t *node = ast_new(AST_RAISE, line, column);

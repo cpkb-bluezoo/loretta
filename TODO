@@ -106,94 +106,194 @@ IN PROGRESS - Compiler
     - Built-in lookup via $G.builtin()
     - Module-level variable storage
 
-[ ] Expression code generation (remaining)
-    - Name lookup (free variables/closures)
-    - Comparison chains (a < b < c)
-    - Method calls
-    - Set literals
-    - Comprehensions
-    - Lambda expressions
-    - Slice objects
+[x] Slice objects
+    - AST_SLICE codegen creates $SL objects
+    - List, tuple, string, bytes all support slicing
+    - Forward and reverse slicing with step
+    - Slice assignment for lists
 
-[ ] Statement code generation (remaining)
-    - Function definitions
-    - Class definitions
-    - try/except/finally
-    - raise
-    - with statement (context managers)
-    - import/from import
-    - assert
-    - del
-    - global/nonlocal declarations
+[x] Set literals
+    - {1, 2, 3} syntax generates $ST.of(Object[])
+    - Fixed 'in' operator operand order for containment checks
 
-[ ] StackMapTable generation
-    - Required for bytecode verification (Java 7+)
-    - Compute stack/local types at branch targets
-    - Frame type inference
-    - Currently using -noverify to test generated code
+[x] Comparison chains
+    - a < b < c now works (equivalent to (a < b) and (b < c))
+    - Intermediate values evaluated only once
+    - Short-circuit evaluation on false
+    - Works with mixed operators (a < b <= c < d)
+    - NOTE: Requires -noverify due to StackMapTable issues
 
-[ ] Closure support
-    - Free variable detection
-    - Cell variable detection
-    - Closure class generation
-    - Nested function compilation
+[x] Method calls
+    - Created $BM (bound method) class for method references
+    - Added __getattr__ to $S, $L, $D returning bound methods
+    - Works with no args: "hello".upper()
+    - Works with args: s.replace("a", "b")
+    - Works as first-class: m = s.upper; m()
 
+[x] Closures
+    - Free variable detection via AST scanning
+    - Closure array passed as hidden first parameter
+    - $MH.withClosure binds captured values
+    - Captured variables accessed via array index
+    - Works with multiple captured variables
 
-IN PROGRESS - Runtime Library (Java)
-------------------------------------
+[x] Comprehensions
+    - List comprehensions: [x*2 for x in nums]
+    - Set comprehensions: {x*2 for x in nums}
+    - Dict comprehensions: {k: v for k, v in items}
+    - Filter conditions: [x for x in nums if x > 0]
+    - Nested generators: [x for row in matrix for x in row]
+
+[x] Lambda expressions
+    - Simple lambdas: lambda x: x + 1
+    - Multiple args: lambda x, y: x + y
+    - No args: lambda: 42
+    - Closures: lambda captures variables from enclosing scope
+
+[x] Generator expressions
+    - Simple: (x*2 for x in nums)
+    - With filter: (x for x in nums if x > 0)
+    - Multiple filters supported
+    - Nested generators fallback to eager evaluation via list iterator
+    - Lazy evaluation via $GE runtime class
+
+[x] Function definitions
+    - Basic function definition and compilation
+    - Parameters as local variables
+    - Default parameter values (null checking at function entry)
+    - *args (vararg) support - receives as tuple parameter
+    - **kwargs support - receives as dict parameter
+    - Function stored as MethodHandle, called via invokedynamic
+
+[x] Class definitions
+    - Basic class: class MyClass: ...
+    - __init__ constructor
+    - Instance methods with self
+    - Instance attributes (self.x)
+    - Inheritance: class Child(Parent): ...
+    - Method override in subclasses
+    - __str__, __repr__ special methods
+    - Arithmetic and comparison operators delegation
+    - $Cls and $Inst runtime classes
+
+[x] del statement
+    - del x (unbind local variable)
+    - del d[key] (call __delitem__)
+    - del obj.attr (call __delattr__)
+
+[x] assert statement
+    - assert condition (raises AssertionError if false)
+    - assert condition, message (with custom message)
+
+[x] Exception handling (basic)
+    - raise "message" (raise exception)
+    - raise exception_obj (raise exception instance)
+    - try/except (catch exceptions)
+    - Nested try blocks
+    - NOTE: Typed except (except TypeError as e:) needs work
+    - NOTE: finally runs but doesn't execute on exception path yet
+
+[x] global/nonlocal declarations
+    - global x (access/modify global variable from function)
+    - Module-level variables automatically stored as globals
+    - Module-level functions and classes stored as globals
+    - nonlocal x (partially - uses closure mechanism)
+
+[x] with statement (context managers)
+    - Basic: with ctx_mgr: body
+    - With binding: with ctx_mgr as var: body
+    - Calls __enter__ on entry, __exit__ on exit
+    - Exception handling with __exit__(type, val, tb)
+    - NOTE: Multiple classes per file has issues with globals
+
+[x] Import/module system
+    - import module: loads and initializes compiled Python module
+    - import module as alias: aliased import
+    - from module import name: imports specific attribute
+    - from module import name as alias: aliased from-import
+    - Module attributes populated from globals after initialization
+    - Module caching (imported once, reused)
+    - Integrates with Java class loading (each module is a .class file)
+
+[x] StackMapTable generation (basic)
+    - Ported from genesis compiler
+    - Type tracking for locals and stack
+    - Frame recording at branch targets
+    - All frame types (same, same_locals_1_stack, chop, append, full)
+    - NOTE: Some edge cases with loops may need refinement
+
+WORKING - Runtime Library (Java)
+--------------------------------
 
 Runtime classes use short $-prefixed names for compact bytecode.
-Located in runtime/src/, compiled to runtime/classes/.
+Located in runtime/src/, compiled to runtime/loretta.jar.
 
-[x] Core types (implemented)
-    - $O  (PyObject)   - Base class for all Python objects
-    - $Y  (PyType)     - Type/class objects (placeholder)
+Build: cd runtime && make
+       Creates loretta.jar with all runtime classes.
+       Use: java -cp runtime/loretta.jar:. <classname>
+
+[x] Core types (implemented and tested)
+    - $O  (PyObject)   - Base class with all protocol methods
     - $N  (PyNone)     - Singleton None
-    - $B  (PyBool)     - Boolean (True, False)
+    - $B  (PyBool)     - Boolean (True, False), extends $I
     - $I  (PyInt)      - Arbitrary precision integer (long + BigInteger)
     - $F  (PyFloat)    - Double-precision float
-    - $S  (PyStr)      - Unicode strings
-    - $L  (PyList)     - Mutable sequences
-    - $T  (PyTuple)    - Immutable sequences
+    - $S  (PyStr)      - Unicode strings with methods + iterator
+    - $L  (PyList)     - Mutable sequences + iterator
+    - $T  (PyTuple)    - Immutable sequences + iterator
     - $D  (PyDict)     - Dictionaries (insertion-ordered)
-    - $X  (PyException)- Runtime exceptions
+    - $X  (PyException)- Runtime exceptions (extends RuntimeException)
+    - $MH (PyMethodHandle) - Wrapper for compiled functions
+    - $C  (PyComplex)  - Complex numbers
+    - $BY (PyBytes)    - Byte sequences + iterator
+    - $ST (PySet)      - Mutable sets + iterator
+    - $FS (PyFrozenSet) - Immutable sets + iterator
+    - $File           - File I/O (for open() builtin)
+    - $SL (PySlice)    - Slice objects
 
 [x] Bootstrap methods ($BS) - implemented
     - binop: binary operations (__add__, __sub__, etc.)
     - unaryop: unary operations (__neg__, __pos__, etc.)
     - compare: comparison operations (__lt__, __eq__, etc.)
-    - getattr/setattr/delattr: attribute access
-    - getitem/setitem/delitem: subscript access
-    - call: function calls
-    - iter/next: iteration protocol
+    - getattr/setattr: attribute access
+    - getitem/setitem: subscript access
+    - call: function calls (handles $MH and __call__)
+    - iter/next: iteration protocol (safeNext catches StopIteration)
     - contains: membership test
-    - builtin: bool conversion for branching
+    - builtin: bool/len/repr/str/hash conversion
 
-[x] Built-in functions ($FN and $G)
-    - I/O: print, input
-    - Types: int, float, str, bool, list, tuple, dict, set
-    - Type introspection: type, isinstance, callable
+[x] Built-in functions ($G)
+    - I/O: print, input, open
+    - Types: int, float, str, bool, list, tuple, dict, set, frozenset, bytes, bytearray, complex
+    - Type introspection: type, isinstance, issubclass, callable
     - Math: abs, min, max, sum, pow, round, divmod
-    - Sequences: len, range, enumerate, zip, map, filter, sorted, reversed
+    - Sequences: len, range, enumerate, zip, map, filter, sorted, reversed, slice
     - Iteration: iter, next
     - Logic: all, any
-    - String/char: repr, ord, chr, hex, oct, bin
-    - Object: hash, id, getattr, setattr, hasattr, delattr
+    - String/char: repr, ord, chr, hex, oct, bin, format, ascii
+    - Object: hash, id, getattr, setattr, hasattr, delattr, dir, vars, globals, locals
+    - Constants: True, False, None (for direct lookup)
+    - Stubs: object (identity constructor)
 
-[ ] Remaining types
-    - $C  (PyComplex)  - Complex numbers
-    - $BY (PyBytes)    - Byte sequences
-    - $ST (PySet)      - Mutable sets
-    - $FS (PyFrozenSet) - Immutable sets
+[x] Tested features (simple programs without complex control flow)
+    - Arithmetic: +, -, *, /, //, %
+    - Comparisons: <, >, ==
+    - Print statements
+    - String concatenation and len()
+    - List creation, indexing, len()
+    - Tuple creation and display
+    - Dict creation and display
+    - Float arithmetic
 
-[ ] Remaining built-in functions
-    - issubclass
-    - open, read, write (file I/O)
-    - dir, vars, globals, locals
+[ ] Tested features (require StackMapTable fixes for control flow)
+    - If/else branching
+    - While loops
+    - For loops with range
+
+[ ] Remaining built-in functions (stubs or not implemented)
     - exec, eval, compile
-    - format, ascii
-    - slice, memoryview, bytearray
-    - object, super
+    - memoryview
+    - super
     - staticmethod, classmethod, property
 
 [ ] Exception types (need proper hierarchy)
@@ -214,8 +314,35 @@ PLANNED - Module System
     - sys.path handling
 
 [ ] Standard library support
-    - Pure Python modules (copy from CPython)
+    - Pure Python modules (from CPython)
     - Java interop wrappers for common functionality
+
+
+KNOWN ISSUES
+------------
+
+[ ] Module-level for loops
+    - For loop target variable not correctly assigned at module level
+    - Variables should be stored in globals at module level
+    - Workaround: wrap in a function
+    - Affects: unpack_test, stmt_test, comp_test, expr_test
+
+[ ] StackMapTable generation
+    - Some complex control flow requires -noverify
+    - Affects comparison chains, some loops
+    - See StackMapTable section for details
+
+[ ] Walrus operator (:=)
+    - Parsed but codegen has issues
+    - NullPointerException in some cases
+
+[ ] Generator expressions
+    - Basic support exists but complex cases fail
+    - Nested generators not fully supported
+
+[ ] Multiple classes per file
+    - Global variable interactions when multiple classes defined
+    - Workaround: one class per file or wrap in functions
 
 
 FUTURE CONSIDERATIONS
@@ -226,6 +353,27 @@ FUTURE CONSIDERATIONS
     - Type inference for local variables
     - Inline caching warmup
     - Dead code elimination
+
+[ ] **IMPORTANT: Native JVM class generation for Python classes**
+    Currently all Python classes use runtime $Cls/$Inst objects with dictionary-based
+    method lookup. This is flexible (supports multiple inheritance, dynamic modification)
+    but slower than native JVM dispatch.
+    
+    For single-inheritance classes without metaclasses, we could generate actual JVM
+    classes where Child extends Parent. This would give:
+    - Native JVM method dispatch (significantly faster)
+    - JVM JIT optimization of method calls
+    - Better integration with Java code
+    
+    Implementation approach:
+    - Detect single-inheritance, no-metaclass classes at compile time
+    - Generate a real JVM class (using ClassWriter) for each Python class
+    - Map __init__ to constructor, methods to instance methods
+    - Instance attributes could use a backing $D or individual fields
+    - Fall back to $Cls/$Inst for multiple inheritance or dynamic cases
+    
+    This is how Jython achieves reasonable performance. Consider prioritizing this
+    optimization once the core language features are complete.
 
 [ ] Python compatibility
     - __slots__

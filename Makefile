@@ -34,9 +34,10 @@ SOURCES = \
     $(SRCDIR)/util.c \
     $(SRCDIR)/lexer.c \
     $(SRCDIR)/parser.c \
-    $(SRCDIR)/analyze.c \
+    $(SRCDIR)/semantic.c \
     $(SRCDIR)/constpool.c \
     $(SRCDIR)/classwriter.c \
+    $(SRCDIR)/stackmap.c \
     $(SRCDIR)/indy.c \
     $(SRCDIR)/codegen.c \
     $(SRCDIR)/loretta.c
@@ -57,11 +58,12 @@ loretta: $(OBJECTS)
 $(SRCDIR)/util.o: $(SRCDIR)/util.c $(SRCDIR)/util.h
 $(SRCDIR)/lexer.o: $(SRCDIR)/lexer.c $(SRCDIR)/loretta.h $(SRCDIR)/util.h
 $(SRCDIR)/parser.o: $(SRCDIR)/parser.c $(SRCDIR)/loretta.h $(SRCDIR)/util.h
-$(SRCDIR)/analyze.o: $(SRCDIR)/analyze.c $(SRCDIR)/loretta.h $(SRCDIR)/util.h
+$(SRCDIR)/semantic.o: $(SRCDIR)/semantic.c $(SRCDIR)/loretta.h $(SRCDIR)/util.h
 $(SRCDIR)/constpool.o: $(SRCDIR)/constpool.c $(SRCDIR)/constpool.h $(SRCDIR)/util.h
 $(SRCDIR)/classwriter.o: $(SRCDIR)/classwriter.c $(SRCDIR)/classwriter.h $(SRCDIR)/constpool.h $(SRCDIR)/util.h
+$(SRCDIR)/stackmap.o: $(SRCDIR)/stackmap.c $(SRCDIR)/stackmap.h $(SRCDIR)/constpool.h $(SRCDIR)/util.h
 $(SRCDIR)/indy.o: $(SRCDIR)/indy.c $(SRCDIR)/indy.h $(SRCDIR)/constpool.h $(SRCDIR)/util.h
-$(SRCDIR)/codegen.o: $(SRCDIR)/codegen.c $(SRCDIR)/codegen.h $(SRCDIR)/loretta.h $(SRCDIR)/constpool.h $(SRCDIR)/classwriter.h $(SRCDIR)/indy.h $(SRCDIR)/util.h
+$(SRCDIR)/codegen.o: $(SRCDIR)/codegen.c $(SRCDIR)/codegen.h $(SRCDIR)/loretta.h $(SRCDIR)/constpool.h $(SRCDIR)/classwriter.h $(SRCDIR)/stackmap.h $(SRCDIR)/indy.h $(SRCDIR)/util.h
 $(SRCDIR)/loretta.o: $(SRCDIR)/loretta.c $(SRCDIR)/loretta.h $(SRCDIR)/util.h $(SRCDIR)/codegen.h
 
 # Clean up
@@ -83,22 +85,34 @@ uninstall:
 TEST_SRC = test
 TEST_BUILD = test/build
 
-# Build and run all tests
-test: loretta
-	@echo "=== Loretta Test Suite ==="
-	@echo ""
-	@mkdir -p $(TEST_BUILD)
-	@echo "Tests not yet implemented"
+# Build runtime library if needed
+runtime/loretta.jar:
+	$(MAKE) -C runtime
 
-# Run a single test with verbose output
-test-one: loretta
-	@mkdir -p $(TEST_BUILD)
+# Build and run all tests
+test: loretta runtime/loretta.jar
+	@./test/run_tests.sh
+
+# Run tests with verbose output (shows failures)
+test-verbose: loretta runtime/loretta.jar
+	@./test/run_tests.sh -v
+
+# Run a single test by name (e.g., make test-one TEST=hello)
+test-one: loretta runtime/loretta.jar
 	@if [ -z "$(TEST)" ]; then \
-		echo "Usage: make test-one TEST=<TestName>"; \
+		echo "Usage: make test-one TEST=<name>"; \
+		echo "Example: make test-one TEST=hello"; \
 		exit 1; \
 	fi
-	@echo "Compiling $(TEST)..."
-	./loretta -v -d $(TEST_BUILD) $(TEST_SRC)/$(TEST).py
+	@./test/run_tests.sh $(TEST)
+
+# Run a single test with verbose output
+test-one-verbose: loretta runtime/loretta.jar
+	@if [ -z "$(TEST)" ]; then \
+		echo "Usage: make test-one-verbose TEST=<name>"; \
+		exit 1; \
+	fi
+	@./test/run_tests.sh -v $(TEST)
 
 # Clean test build directory
 test-clean:
@@ -108,4 +122,4 @@ test-clean:
 release:
 	$(MAKE) DEBUG=0 clean all
 
-.PHONY: all clean install uninstall test test-one test-clean release
+.PHONY: all clean install uninstall test test-verbose test-one test-one-verbose test-clean release
