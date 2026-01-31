@@ -1,3 +1,6 @@
+import java.util.ArrayList;
+import java.util.List;
+
 /**
  * $Cls - Python class object.
  * 
@@ -5,6 +8,7 @@
  * - Class name
  * - Base classes (for inheritance)
  * - Methods and class attributes as a dictionary
+ * - MRO (Method Resolution Order) computed using C3 linearization
  * 
  * Calling a class creates a new instance.
  */
@@ -13,9 +17,13 @@ public final class $Cls extends $O {
     public final String name;
     public final $Cls[] bases;
     public final $D attrs;  // Methods and class attributes
+    public final $Cls[] mro;  // Method Resolution Order (C3 linearization)
     
     /** For built-in types: the corresponding Java class */
     public Class<?> javaClass;
+    
+    /** Slot names for __slots__ support (null means use dict) */
+    public String[] slots;
     
     /**
      * Create a new class.
@@ -25,6 +33,8 @@ public final class $Cls extends $O {
         this.bases = bases != null ? bases : new $Cls[0];
         this.attrs = new $D();
         this.javaClass = null;
+        this.slots = null;  // No slots by default
+        this.mro = computeMRO();
     }
     
     /**
@@ -32,6 +42,120 @@ public final class $Cls extends $O {
      */
     public $Cls(String name) {
         this(name, null);
+    }
+    
+    /**
+     * Compute the Method Resolution Order using C3 linearization.
+     * 
+     * C3 linearization ensures:
+     * 1. Local precedence order (children before parents, left-to-right)
+     * 2. Monotonicity (if A precedes B in one class, it does in subclasses)
+     * 
+     * Algorithm: L[C] = C + merge(L[B1], L[B2], ..., L[Bn], [B1, B2, ..., Bn])
+     * where merge repeatedly selects the first head that doesn't appear in any tail.
+     */
+    private $Cls[] computeMRO() {
+        List<$Cls> result = new ArrayList<>();
+        result.add(this);
+        
+        if (bases.length == 0) {
+            // No bases - MRO is just this class
+            return result.toArray(new $Cls[0]);
+        }
+        
+        // Build the list of lists to merge:
+        // - MRO of each base class
+        // - The list of bases themselves
+        List<List<$Cls>> toMerge = new ArrayList<>();
+        for ($Cls base : bases) {
+            List<$Cls> baseMRO = new ArrayList<>();
+            for ($Cls c : base.mro) {
+                baseMRO.add(c);
+            }
+            toMerge.add(baseMRO);
+        }
+        // Add the list of direct bases
+        List<$Cls> basesList = new ArrayList<>();
+        for ($Cls base : bases) {
+            basesList.add(base);
+        }
+        toMerge.add(basesList);
+        
+        // C3 merge algorithm
+        while (true) {
+            // Remove empty lists
+            toMerge.removeIf(List::isEmpty);
+            
+            if (toMerge.isEmpty()) {
+                break;
+            }
+            
+            // Find a good head: first element of some list that doesn't
+            // appear in the tail of any other list
+            $Cls candidate = null;
+            for (List<$Cls> lst : toMerge) {
+                $Cls head = lst.get(0);
+                boolean inTail = false;
+                
+                // Check if head appears in tail of any list
+                for (List<$Cls> other : toMerge) {
+                    for (int i = 1; i < other.size(); i++) {
+                        if (other.get(i) == head) {
+                            inTail = true;
+                            break;
+                        }
+                    }
+                    if (inTail) break;
+                }
+                
+                if (!inTail) {
+                    candidate = head;
+                    break;
+                }
+            }
+            
+            if (candidate == null) {
+                // No valid candidate - inconsistent MRO
+                throw new $X("TypeError", 
+                    "Cannot create a consistent method resolution order (MRO) for bases");
+            }
+            
+            // Add candidate to result
+            result.add(candidate);
+            
+            // Remove candidate from all lists
+            for (List<$Cls> lst : toMerge) {
+                lst.remove(candidate);
+            }
+        }
+        
+        return result.toArray(new $Cls[0]);
+    }
+    
+    /**
+     * Set __slots__ for this class.
+     * @param slotNames Array of allowed attribute names
+     */
+    public void setSlots(String[] slotNames) {
+        this.slots = slotNames;
+    }
+    
+    /**
+     * Check if this class uses __slots__.
+     */
+    public boolean hasSlots() {
+        return slots != null;
+    }
+    
+    /**
+     * Get the index of a slot by name, or -1 if not found.
+     */
+    public int getSlotIndex(String name) {
+        if (slots == null) return -1;
+        for (int i = 0; i < slots.length; i++) {
+            if (slots[i].equals(name)) return i;
+        }
+        return -1;
     }
     
     /**
@@ -43,20 +167,15 @@ public final class $Cls extends $O {
     
     /**
      * Get a raw attribute without descriptor processing.
-     * Used internally to check descriptor types.
+     * Uses MRO (Method Resolution Order) for lookup.
      */
     public $O getRawAttr(String name) {
         $S key = $S.of(name);
-        if (attrs.__contains__(key).__bool__()) {
-            return attrs.__getitem__(key);
-        }
         
-        // Check base classes
-        for ($Cls base : bases) {
-            try {
-                return base.getRawAttr(name);
-            } catch ($X e) {
-                // Continue to next base
+        // Walk the MRO to find the attribute
+        for ($Cls cls : mro) {
+            if (cls.attrs.__contains__(key).__bool__()) {
+                return cls.attrs.__getitem__(key);
             }
         }
         
@@ -84,14 +203,13 @@ public final class $Cls extends $O {
     
     /**
      * Check if class has an attribute.
+     * Uses MRO (Method Resolution Order) for lookup.
      */
     public boolean hasAttr(String name) {
         $S key = $S.of(name);
-        if (attrs.__contains__(key).__bool__()) {
-            return true;
-        }
-        for ($Cls base : bases) {
-            if (base.hasAttr(name)) {
+        // Walk the MRO to find the attribute
+        for ($Cls cls : mro) {
+            if (cls.attrs.__contains__(key).__bool__()) {
                 return true;
             }
         }

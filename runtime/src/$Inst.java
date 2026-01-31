@@ -10,23 +10,43 @@
 public final class $Inst extends $O {
     
     public final $Cls type;
-    public final $D attrs;  // Instance attributes
+    public final $D attrs;  // Instance attributes (null if using slots)
+    public final $O[] slotValues;  // Slot values (null if not using slots)
     
     /**
      * Create a new instance of a class.
      */
     public $Inst($Cls type) {
         this.type = type;
-        this.attrs = new $D();
+        if (type.hasSlots()) {
+            // Use array-based storage for slots
+            this.attrs = null;
+            this.slotValues = new $O[type.slots.length];
+        } else {
+            // Use dict-based storage
+            this.attrs = new $D();
+            this.slotValues = null;
+        }
     }
     
     @Override
     public $O __getattr__(String name) {
-        $S key = $S.of(name);
-        
-        // First check instance attributes
-        if (attrs.__contains__(key).__bool__()) {
-            return attrs.__getitem__(key);
+        // Check slots first if using slots
+        if (slotValues != null) {
+            int idx = type.getSlotIndex(name);
+            if (idx >= 0) {
+                $O value = slotValues[idx];
+                if (value != null) {
+                    return value;
+                }
+                throw new $X("AttributeError", "'" + type.name + "' object has no attribute '" + name + "'");
+            }
+        } else {
+            // Check dict-based instance attributes
+            $S key = $S.of(name);
+            if (attrs.__contains__(key).__bool__()) {
+                return attrs.__getitem__(key);
+            }
         }
         
         // Then check class for methods/class attrs
@@ -71,7 +91,18 @@ public final class $Inst extends $O {
                 return;
             }
         }
-        // Normal attribute assignment
+        
+        // Handle slots-based storage
+        if (slotValues != null) {
+            int idx = type.getSlotIndex(name);
+            if (idx >= 0) {
+                slotValues[idx] = value;
+                return;
+            }
+            throw new $X("AttributeError", "'" + type.name + "' object has no attribute '" + name + "'");
+        }
+        
+        // Normal dict-based attribute assignment
         attrs.__setitem__($S.of(name), value);
     }
     
@@ -84,7 +115,21 @@ public final class $Inst extends $O {
                 return;
             }
         }
-        // Normal attribute deletion
+        
+        // Handle slots-based storage
+        if (slotValues != null) {
+            int idx = type.getSlotIndex(name);
+            if (idx >= 0) {
+                if (slotValues[idx] != null) {
+                    slotValues[idx] = null;
+                    return;
+                }
+                throw new $X("AttributeError", "'" + type.name + "' object has no attribute '" + name + "'");
+            }
+            throw new $X("AttributeError", "'" + type.name + "' object has no attribute '" + name + "'");
+        }
+        
+        // Normal dict-based attribute deletion
         $S key = $S.of(name);
         if (attrs.__contains__(key).__bool__()) {
             attrs.__delitem__(key);

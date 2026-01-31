@@ -49,10 +49,41 @@ public final class $BS {
     
     /**
      * Bootstrap method for comparison operations (__lt__, __eq__, etc.)
+     * Also handles 'is' and 'is_not' for identity comparison.
      */
     public static CallSite compare(MethodHandles.Lookup lookup, String name, MethodType type) {
-        // Comparisons are just binary operations returning $O (which is a $B)
-        return binop(lookup, name, type);
+        MethodHandle mh;
+        try {
+            if (name.equals("is")) {
+                // Identity comparison - return True if same object
+                mh = LOOKUP.findStatic($BS.class, "identityCompare",
+                        MethodType.methodType($O.class, $O.class, $O.class));
+            } else if (name.equals("is_not")) {
+                // Negated identity comparison
+                mh = LOOKUP.findStatic($BS.class, "notIdentityCompare",
+                        MethodType.methodType($O.class, $O.class, $O.class));
+            } else {
+                // Regular comparison - look up method on $O
+                mh = LOOKUP.findVirtual($O.class, name, MethodType.methodType($O.class, $O.class));
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to bootstrap compare: " + name, e);
+        }
+        return new ConstantCallSite(mh.asType(type));
+    }
+    
+    /**
+     * Identity comparison (is operator).
+     */
+    public static $O identityCompare($O a, $O b) {
+        return $B.of(a == b);
+    }
+    
+    /**
+     * Negated identity comparison (is not operator).
+     */
+    public static $O notIdentityCompare($O a, $O b) {
+        return $B.of(a != b);
     }
     
     /**

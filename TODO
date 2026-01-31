@@ -397,9 +397,10 @@ KNOWN ISSUES
 [x] Generator expressions - FIXED
     - Full support including nested generators
 
-[ ] Multiple classes per file
-    - Global variable interactions when multiple classes defined
-    - Workaround: one class per file or wrap in functions
+[x] Multiple classes per file - FIXED
+    - Fixed 'is' / 'is not' identity comparison (was calling non-existent method)
+    - Fixed stackmap state at if/else join points
+    - Multiple classes referencing each other now work correctly
 
 
 FUTURE CONSIDERATIONS
@@ -433,9 +434,14 @@ FUTURE CONSIDERATIONS
     optimization once the core language features are complete.
 
 [ ] Python compatibility - remaining features
-    - __slots__
+    - [x] __slots__ - implemented with array-based storage
+          Classes with __slots__ use array instead of dict for instance attrs
+          Invalid attribute assignment raises AttributeError
     - Metaclasses
-    - Multiple inheritance with C3 MRO
+    - [x] Multiple inheritance with C3 MRO
+          MRO computed at class creation using C3 linearization algorithm
+          Attribute lookup walks MRO instead of depth-first bases
+          Inconsistent MRO (e.g., class C(A, B) where B extends A) raises TypeError
     
 [x] Python compatibility - implemented
     - Descriptors (property, classmethod, staticmethod) - see line 317
@@ -455,7 +461,8 @@ FUTURE CONSIDERATIONS
     - Exception bridging
 
 [ ] Tooling
-    - Source maps for debugging
+    - [x] Source maps for debugging - LineNumberTable now generated
+          Stack traces show Python file and line numbers
     - REPL
     - Package manager integration
 

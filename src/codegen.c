@@ -32,6 +32,7 @@ static void codegen_function_def(codegen_ctx_t *ctx, ast_node_t *node);
 static void codegen_lambda(codegen_ctx_t *ctx, ast_node_t *node);
 static void codegen_match_pattern(codegen_ctx_t *ctx, ast_node_t *pattern,
                                    int subject_slot, label_t *fail_label);
+static void emit_line_number(codegen_ctx_t *ctx, int line);
 
 /* Global lambda counter for unique method names */
 static int lambda_counter = 0;
@@ -1651,6 +1652,9 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
         return;
     }
 
+    /* Emit line number for debugging */
+    emit_line_number(ctx, node->line);
+
     switch (node->type) {
         /* Constants (literals) */
         case AST_CONSTANT: {
@@ -2747,11 +2751,28 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
 /**
  * Generate code for a statement node.
  */
+/**
+ * Emit a line number entry if the source line has changed.
+ * This populates the LineNumberTable for debugging.
+ */
+static void emit_line_number(codegen_ctx_t *ctx, int line)
+{
+    if (line > 0 && line != ctx->current_line) {
+        ctx->current_line = line;
+        const_pool_t *cp = class_writer_get_cp(ctx->cw);
+        code_attr_add_line_number(ctx->code_attr, cp, 
+                                   (uint16_t)ctx->code->len, (uint16_t)line);
+    }
+}
+
 static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
 {
     if (!node || ctx->error_msg) {
         return;
     }
+
+    /* Emit line number for debugging */
+    emit_line_number(ctx, node->line);
 
     switch (node->type) {
         /* Expression statement */
@@ -2913,6 +2934,13 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
             codegen_mark_label(ctx, else_label);
             if (node->data.if_stmt.orelse) {
                 codegen_stmts(ctx, node->data.if_stmt.orelse);
+            }
+
+            /* Restore pre-branch state before marking end_label.
+             * This ensures the join point has the state from before
+             * the if, not including any locals allocated in branches. */
+            if (ctx->stackmap && pre_branch_state) {
+                stackmap_restore_state(ctx->stackmap, pre_branch_state);
             }
 
             codegen_mark_label(ctx, end_label);
@@ -4062,6 +4090,54 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                         ast_node_t *target = t->data;
                         if (target->type == AST_NAME) {
                             const char *attr_name = target->data.name.id;
+                            
+                            /* Check for __slots__ assignment */
+                            if (strcmp(attr_name, "__slots__") == 0) {
+                                ast_node_t *value = stmt->data.assign.value;
+                                /* __slots__ should be a tuple or list of strings */
+                                if (value->type == AST_TUPLE || value->type == AST_LIST) {
+                                    slist_t *elts = value->data.collection.elts;
+                                    int num_slots = slist_length(elts);
+                                    
+                                    /* Create String array for slots */
+                                    emit_aload(ctx, class_slot);
+                                    emit_iconst(ctx, num_slots);
+                                    emit_anewarray(ctx, "java/lang/String");
+                                    
+                                    /* Fill the array with slot names */
+                                    int slot_i = 0;
+                                    for (slist_t *e = elts; e; e = e->next) {
+                                        ast_node_t *elt = e->data;
+                                        emit_u8(ctx, OP_DUP);
+                                        stack_push(ctx, 1);
+                                        emit_iconst(ctx, slot_i);
+                                        /* Extract string value */
+                                        if (elt->type == AST_CONSTANT && 
+                                            elt->data.constant.kind == TOK_STRING) {
+                                            emit_ldc_string(ctx, elt->data.constant.value.str_val);
+                                        } else {
+                                            /* Evaluate and convert to string - get Java String */
+                                            codegen_expr(ctx, elt);
+                                            emit_invokevirtual(ctx, LRT_OBJECT, "__str__",
+                                                             "()" DESC_STR);
+                                            emit_getfield(ctx, LRT_STR, "value",
+                                                        "Ljava/lang/String;");
+                                        }
+                                        emit_u8(ctx, OP_AASTORE);
+                                        stack_pop(ctx, 3);
+                                        slot_i++;
+                                    }
+                                    
+                                    /* Call $Cls.setSlots(String[]) */
+                                    emit_invokevirtual(ctx, LRT_CLASS, "setSlots",
+                                                       "([Ljava/lang/String;)V");
+                                    stack_pop(ctx, 2);  /* class + array consumed */
+                                    if (ctx->stackmap) {
+                                        stackmap_pop(ctx->stackmap, 2);
+                                    }
+                                    continue;  /* Skip normal setAttr for __slots__ */
+                                }
+                            }
 
                             emit_aload(ctx, class_slot);
                             emit_ldc_string(ctx, attr_name);

@@ -61,7 +61,10 @@ public final class $MH extends $O {
         } catch (Throwable t) {
             if (t instanceof $X) throw ($X) t;
             if (t instanceof RuntimeException) throw (RuntimeException) t;
-            throw new $X("RuntimeError", t.getMessage());
+            // Preserve the original exception as the cause
+            $X ex = new $X("RuntimeError", t.getClass().getName() + ": " + t.getMessage());
+            ex.initCause(t);
+            throw ex;
         }
     }
     
