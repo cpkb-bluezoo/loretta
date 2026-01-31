@@ -121,7 +121,7 @@ IN PROGRESS - Compiler
     - Intermediate values evaluated only once
     - Short-circuit evaluation on false
     - Works with mixed operators (a < b <= c < d)
-    - NOTE: Requires -noverify due to StackMapTable issues
+    - NOTE: May still require -noverify for complex cases
 
 [x] Method calls
     - Created $BM (bound method) class for method references
@@ -215,12 +215,16 @@ IN PROGRESS - Compiler
     - Module caching (imported once, reused)
     - Integrates with Java class loading (each module is a .class file)
 
-[x] StackMapTable generation (basic)
+[x] StackMapTable generation (improved)
     - Ported from genesis compiler
     - Type tracking for locals and stack
     - Frame recording at branch targets
     - All frame types (same, same_locals_1_stack, chop, append, full)
-    - NOTE: Some edge cases with loops may need refinement
+    - Fixed: Missing stackmap_pop for setGlobal calls
+    - Fixed: Missing stackmap tracking for DUP/AASTORE in array building
+    - Fixed: Missing stackmap_pop for expression statement POP
+    - Fixed: State save/restore for for loop end_label
+    - NOTE: Advanced features (walrus operator, with statement, yield) still need work
 
 WORKING - Runtime Library (Java)
 --------------------------------
@@ -285,16 +289,19 @@ Build: cd runtime && make
     - Dict creation and display
     - Float arithmetic
 
-[ ] Tested features (require StackMapTable fixes for control flow)
-    - If/else branching
-    - While loops
-    - For loops with range
+[x] Tested features (control flow - StackMapTable fixes applied)
+    - If/else branching - works without -noverify
+    - While loops - works without -noverify
+    - For loops with range - works without -noverify
+    - Walrus operator (:=) - works without -noverify
+    - 28 of 34 tests pass without -noverify (progress from 27)
+    - NOTE: 6 tests need -noverify (assert, chain, except, genexp, with, yield)
 
-[ ] Remaining built-in functions (stubs or not implemented)
-    - exec, eval, compile
-    - memoryview
-    - super
-    - staticmethod, classmethod, property
+[x] Remaining built-in functions (implemented or stubbed)
+    - exec, eval, compile (eval supports literals, others raise NotImplementedError)
+    - memoryview (full support with $MV class)
+    - super (super(cls, obj) for parent class access)
+    - staticmethod, classmethod, property (full decorator support)
 
 [ ] Exception types (need proper hierarchy)
     - BaseException, Exception

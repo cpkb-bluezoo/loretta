@@ -31,15 +31,31 @@ public final class $Inst extends $O {
         
         // Then check class for methods/class attrs
         if (type.hasAttr(name)) {
-            $O classAttr = type.getAttr(name);
+            // Get the raw attribute first to check descriptor type
+            $O rawAttr = type.getRawAttr(name);
+            
+            // Handle property descriptor
+            if (rawAttr instanceof $Prop) {
+                return (($Prop) rawAttr).get(this);
+            }
+            
+            // Handle staticmethod descriptor - return unwrapped function (no binding!)
+            if (rawAttr instanceof $SM) {
+                return (($SM) rawAttr).getFunc();
+            }
+            
+            // Handle classmethod descriptor - bind to class (not instance)
+            if (rawAttr instanceof $CM) {
+                return (($CM) rawAttr).bind(type);
+            }
             
             // If it's a callable (method), bind it to this instance
-            if (classAttr instanceof $MH) {
-                return new $BM(this, name, ($MH) classAttr);
+            if (rawAttr instanceof $MH) {
+                return new $BM(this, name, ($MH) rawAttr);
             }
             
             // Otherwise return as-is (class variable)
-            return classAttr;
+            return rawAttr;
         }
         
         throw new $X("AttributeError", "'" + type.name + "' object has no attribute '" + name + "'");
@@ -47,10 +63,28 @@ public final class $Inst extends $O {
     
     @Override
     public void __setattr__(String name, $O value) {
+        // Check for property descriptor in class
+        if (type.hasAttr(name)) {
+            $O classAttr = type.getAttr(name);
+            if (classAttr instanceof $Prop) {
+                (($Prop) classAttr).set(this, value);
+                return;
+            }
+        }
+        // Normal attribute assignment
         attrs.__setitem__($S.of(name), value);
     }
     
     public void __delattr__(String name) {
+        // Check for property descriptor in class
+        if (type.hasAttr(name)) {
+            $O classAttr = type.getAttr(name);
+            if (classAttr instanceof $Prop) {
+                (($Prop) classAttr).delete(this);
+                return;
+            }
+        }
+        // Normal attribute deletion
         $S key = $S.of(name);
         if (attrs.__contains__(key).__bool__()) {
             attrs.__delitem__(key);

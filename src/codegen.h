@@ -313,6 +313,10 @@ struct codegen_ctx
     slist_t *captured_vars;         /* List of captured variable names (char*) */
     int closure_slot;               /* Local slot for closure array (-1 if none) */
 
+    /* Generator support */
+    bool is_generator;              /* True if compiling a generator function */
+    int yield_list_slot;            /* Local slot for yield accumulator list (-1 if not gen) */
+
     /* Class context (when compiling methods inside a class) */
     const char *current_class_name; /* Non-null when inside a class definition */
 

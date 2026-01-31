@@ -269,6 +269,13 @@ const char *indy_cmpop_name(py_indy_op_t op);
 /* Generator expression */
 #define LRT_GENEXP      "$GE"
 
+/* Generator (for yield) */
+#define LRT_GEN         "$Gen"
+
+/* Async support (virtual threads) */
+#define LRT_ASYNC       "$Async"
+#define LRT_FUTURE      "$Future"
+
 /* Class and instance */
 #define LRT_CLASS       "$Cls"
 #define LRT_INSTANCE    "$Inst"

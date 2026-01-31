@@ -25,11 +25,8 @@ PASSED=0
 FAILED=0
 SKIPPED=0
 
-# Tests to skip (known issues, async features, etc.)
-# - async_test: async/await not yet implemented
+# Tests to skip (known issues)
 # - match_test: match/case not yet implemented
-# - yield_test: generators not yet implemented
-# - walrus_test: walrus operator (:=) has issues
 # - advanced_test: uses multiple advanced features
 # - parser_test: uses features being tested
 # - runtime_test: uses features being tested
@@ -38,8 +35,7 @@ SKIPPED=0
 # - comp_test: module-level comprehension issues
 # - expr_test: module-level for loops
 # - call_test: complex calling conventions
-# - genexp_test: generator expressions
-SKIP_TESTS="async_test match_test yield_test walrus_test advanced_test parser_test runtime_test stmt_test unpack_test comp_test expr_test call_test genexp_test"
+SKIP_TESTS="match_test advanced_test parser_test runtime_test stmt_test unpack_test comp_test expr_test call_test"
 
 # Module dependencies - compile these first (not run as tests)
 MODULES="mymodule"

@@ -38,9 +38,10 @@ public final class $Cls extends $O {
     }
     
     /**
-     * Get a method or class attribute.
+     * Get a raw attribute without descriptor processing.
+     * Used internally to check descriptor types.
      */
-    public $O getAttr(String name) {
+    public $O getRawAttr(String name) {
         $S key = $S.of(name);
         if (attrs.__contains__(key).__bool__()) {
             return attrs.__getitem__(key);
@@ -49,13 +50,32 @@ public final class $Cls extends $O {
         // Check base classes
         for ($Cls base : bases) {
             try {
-                return base.getAttr(name);
+                return base.getRawAttr(name);
             } catch ($X e) {
                 // Continue to next base
             }
         }
         
         throw new $X("AttributeError", "type object '" + this.name + "' has no attribute '" + name + "'");
+    }
+    
+    /**
+     * Get a method or class attribute with descriptor processing.
+     */
+    public $O getAttr(String name) {
+        $O attr = getRawAttr(name);
+        
+        // Handle staticmethod - return unwrapped function
+        if (attr instanceof $SM) {
+            return (($SM) attr).getFunc();
+        }
+        
+        // Handle classmethod - bind to this class
+        if (attr instanceof $CM) {
+            return (($CM) attr).bind(this);
+        }
+        
+        return attr;
     }
     
     /**

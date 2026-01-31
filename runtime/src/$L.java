@@ -276,7 +276,23 @@ public final class $L extends $O {
                 items.add(item);
             }
         } else {
-            throw new $X("TypeError", "object is not iterable");
+            // Try iterator protocol for any other iterable
+            try {
+                $O iter = iterable.__iter__();
+                while (true) {
+                    try {
+                        $O item = iter.__next__();
+                        items.add(item);
+                    } catch ($X e) {
+                        if (e.isStopIteration()) {
+                            break;
+                        }
+                        throw e;
+                    }
+                }
+            } catch (UnsupportedOperationException e) {
+                throw new $X("TypeError", "object is not iterable");
+            }
         }
     }
     

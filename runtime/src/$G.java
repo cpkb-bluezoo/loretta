@@ -170,6 +170,21 @@ public final class $G {
             case "issubclass": return ISSUBCLASS;
             case "delattr": return DELATTR;
             case "__import__": return __IMPORT__;
+            // Class-related builtins
+            case "super": return SUPER;
+            case "staticmethod": return STATICMETHOD;
+            case "classmethod": return CLASSMETHOD;
+            case "property": return PROPERTY;
+            // Memory and eval builtins
+            case "memoryview": return MEMORYVIEW;
+            case "exec": return EXEC;
+            case "eval": return EVAL;
+            case "compile": return COMPILE;
+            // Async builtins
+            case "async_gather": return ASYNC_GATHER;
+            case "async_sleep": return ASYNC_SLEEP;
+            case "async_run": return ASYNC_RUN;
+            case "async_thread": return ASYNC_THREAD;
             // Constants
             case "True": return $B.TRUE;
             case "False": return $B.FALSE;
@@ -1108,6 +1123,224 @@ public final class $G {
         }
         @Override
         public $S __repr__() { return $S.of("<built-in function __import__>"); }
+    };
+    
+    // Async builtins (using virtual threads)
+    
+    public static final $O ASYNC_GATHER = new $O() {
+        @Override
+        public $O __call__($O... args) {
+            // Gather multiple coroutines/callables and run them concurrently
+            $L coroutines = new $L();
+            for ($O arg : args) {
+                coroutines.append(arg);
+            }
+            return $Async.gather(coroutines);
+        }
+        @Override
+        public $S __repr__() { return $S.of("<built-in function async_gather>"); }
+    };
+    
+    public static final $O ASYNC_SLEEP = new $O() {
+        @Override
+        public $O __call__($O... args) {
+            if (args.length < 1) throw new $X("TypeError", "async_sleep() takes 1 argument");
+            double seconds;
+            if (args[0] instanceof $I) {
+                seconds = (double)(($I)args[0]).value;
+            } else if (args[0] instanceof $F) {
+                seconds = (($F)args[0]).value;
+            } else {
+                throw new $X("TypeError", "sleep time must be a number");
+            }
+            $Async.sleep(seconds);
+            return $N.INSTANCE;
+        }
+        @Override
+        public $S __repr__() { return $S.of("<built-in function async_sleep>"); }
+    };
+    
+    public static final $O ASYNC_RUN = new $O() {
+        @Override
+        public $O __call__($O... args) {
+            if (args.length < 1) throw new $X("TypeError", "async_run() takes at least 1 argument");
+            if (!(args[0] instanceof $MH)) {
+                throw new $X("TypeError", "async_run() argument must be a coroutine");
+            }
+            $MH coroutine = ($MH)args[0];
+            $O[] remaining = new $O[args.length - 1];
+            System.arraycopy(args, 1, remaining, 0, remaining.length);
+            
+            $Future future = $Async.run(coroutine, remaining);
+            return future.get();  // Block until complete
+        }
+        @Override
+        public $S __repr__() { return $S.of("<built-in function async_run>"); }
+    };
+    
+    public static final $O ASYNC_THREAD = new $O() {
+        @Override
+        public $O __call__($O... args) {
+            return $Async.currentThread();
+        }
+        @Override
+        public $S __repr__() { return $S.of("<built-in function async_thread>"); }
+    };
+    
+    // Class-related builtins
+    
+    public static final $O SUPER = new $O() {
+        @Override
+        public $O __call__($O... args) {
+            if (args.length == 0) {
+                // Zero-argument super() - requires magic to get class and self
+                // For now, require explicit arguments
+                throw new $X("TypeError", "super() requires at least 1 argument (use super(ClassName, self))");
+            }
+            if (args.length == 1) {
+                if (!(args[0] instanceof $Cls)) {
+                    throw new $X("TypeError", "super() argument 1 must be a class");
+                }
+                return new $Super(($Cls) args[0]);
+            }
+            if (args.length == 2) {
+                if (!(args[0] instanceof $Cls)) {
+                    throw new $X("TypeError", "super() argument 1 must be a class");
+                }
+                return new $Super(($Cls) args[0], args[1]);
+            }
+            throw new $X("TypeError", "super() takes 1 or 2 arguments");
+        }
+        @Override
+        public $S __repr__() { return $S.of("<class 'super'>"); }
+    };
+    
+    public static final $O STATICMETHOD = new $O() {
+        @Override
+        public $O __call__($O... args) {
+            if (args.length != 1) throw new $X("TypeError", "staticmethod() takes exactly 1 argument");
+            return new $SM(args[0]);
+        }
+        @Override
+        public $S __repr__() { return $S.of("<class 'staticmethod'>"); }
+    };
+    
+    public static final $O CLASSMETHOD = new $O() {
+        @Override
+        public $O __call__($O... args) {
+            if (args.length != 1) throw new $X("TypeError", "classmethod() takes exactly 1 argument");
+            return new $CM(args[0]);
+        }
+        @Override
+        public $S __repr__() { return $S.of("<class 'classmethod'>"); }
+    };
+    
+    public static final $O PROPERTY = new $O() {
+        @Override
+        public $O __call__($O... args) {
+            if (args.length == 0) {
+                // Return a property that can be used as decorator
+                return new $Prop(null);
+            }
+            if (args.length == 1) {
+                return new $Prop(args[0]);
+            }
+            if (args.length == 2) {
+                return new $Prop(args[0], args[1]);
+            }
+            if (args.length == 3) {
+                return new $Prop(args[0], args[1], args[2]);
+            }
+            if (args.length == 4) {
+                String doc = args[3] instanceof $S ? (($S)args[3]).value : null;
+                return new $Prop(args[0], args[1], args[2], doc);
+            }
+            throw new $X("TypeError", "property() takes at most 4 arguments");
+        }
+        @Override
+        public $O __getattr__(String name) {
+            // Allow property.setter etc. as decorators
+            if (name.equals("setter") || name.equals("getter") || name.equals("deleter")) {
+                return new $Prop(null).__getattr__(name);
+            }
+            throw new $X("AttributeError", "type object 'property' has no attribute '" + name + "'");
+        }
+        @Override
+        public $S __repr__() { return $S.of("<class 'property'>"); }
+    };
+    
+    public static final $O MEMORYVIEW = new $O() {
+        @Override
+        public $O __call__($O... args) {
+            if (args.length != 1) throw new $X("TypeError", "memoryview() takes exactly 1 argument");
+            if (args[0] instanceof $BY) {
+                return new $MV(($BY) args[0]);
+            }
+            throw new $X("TypeError", "memoryview: a bytes-like object is required");
+        }
+        @Override
+        public $S __repr__() { return $S.of("<class 'memoryview'>"); }
+    };
+    
+    public static final $O EXEC = new $O() {
+        @Override
+        public $O __call__($O... args) {
+            // exec() requires runtime compilation which we don't support
+            // Provide a stub that raises NotImplementedError
+            throw new $X("NotImplementedError", 
+                "exec() is not supported - Loretta compiles ahead-of-time");
+        }
+        @Override
+        public $S __repr__() { return $S.of("<built-in function exec>"); }
+    };
+    
+    public static final $O EVAL = new $O() {
+        @Override
+        public $O __call__($O... args) {
+            // eval() requires runtime compilation which we don't support
+            // For simple cases, we could potentially evaluate literals
+            if (args.length >= 1 && args[0] instanceof $S) {
+                String code = (($S) args[0]).value.trim();
+                
+                // Try to evaluate simple literals
+                try {
+                    // Integer literal
+                    if (code.matches("-?\\d+")) {
+                        return $I.of(Long.parseLong(code));
+                    }
+                    // Float literal
+                    if (code.matches("-?\\d+\\.\\d*([eE][+-]?\\d+)?")) {
+                        return $F.of(Double.parseDouble(code));
+                    }
+                    // String literal
+                    if ((code.startsWith("'") && code.endsWith("'")) ||
+                        (code.startsWith("\"") && code.endsWith("\""))) {
+                        return $S.of(code.substring(1, code.length() - 1));
+                    }
+                    // Boolean literals
+                    if (code.equals("True")) return $B.TRUE;
+                    if (code.equals("False")) return $B.FALSE;
+                    if (code.equals("None")) return $N.INSTANCE;
+                } catch (NumberFormatException e) {
+                    // Fall through to error
+                }
+            }
+            throw new $X("NotImplementedError", 
+                "eval() only supports simple literals - Loretta compiles ahead-of-time");
+        }
+        @Override
+        public $S __repr__() { return $S.of("<built-in function eval>"); }
+    };
+    
+    public static final $O COMPILE = new $O() {
+        @Override
+        public $O __call__($O... args) {
+            // compile() requires runtime compilation which we don't support
+            throw new $X("NotImplementedError", 
+                "compile() is not supported - Loretta compiles ahead-of-time");
+        }
+        @Override
+        public $S __repr__() { return $S.of("<built-in function compile>"); }
     };
 }
 

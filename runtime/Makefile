@@ -3,7 +3,7 @@
 
 JAVAC = javac
 JAR = jar
-JAVAC_FLAGS = -source 11 -target 11 -Xlint:-options
+JAVAC_FLAGS = -source 21 -target 21 -Xlint:-options
 
 SRC_DIR = src
 BUILD_DIR = classes
@@ -26,7 +26,10 @@ JAVA_SOURCES = \
 	$(SRC_DIR)/$$G.java $(SRC_DIR)/$$C.java $(SRC_DIR)/$$BY.java \
 	$(SRC_DIR)/$$ST.java $(SRC_DIR)/$$FS.java $(SRC_DIR)/$$File.java \
 	$(SRC_DIR)/$$SL.java $(SRC_DIR)/$$BM.java $(SRC_DIR)/$$GE.java \
-	$(SRC_DIR)/$$Cls.java $(SRC_DIR)/$$Inst.java $(SRC_DIR)/$$Mod.java
+	$(SRC_DIR)/$$Cls.java $(SRC_DIR)/$$Inst.java $(SRC_DIR)/$$Mod.java \
+	$(SRC_DIR)/$$Gen.java $(SRC_DIR)/$$Future.java $(SRC_DIR)/$$Async.java \
+	$(SRC_DIR)/$$Super.java $(SRC_DIR)/$$SM.java $(SRC_DIR)/$$CM.java \
+	$(SRC_DIR)/$$Prop.java $(SRC_DIR)/$$MV.java
 
 # Compile all Java files - use shell glob with quotes to handle $ in filenames
 # Touch stamp file to track compilation time
@@ -36,7 +39,9 @@ JAVA_SOURCES = \
 		'$$B.java' '$$X.java' '$$L.java' '$$T.java' '$$D.java' \
 		'$$MH.java' '$$BS.java' '$$G.java' '$$C.java' '$$BY.java' \
 		'$$ST.java' '$$FS.java' '$$File.java' '$$SL.java' '$$BM.java' \
-		'$$GE.java' '$$Cls.java' '$$Inst.java' '$$Mod.java'
+		'$$GE.java' '$$Cls.java' '$$Inst.java' '$$Mod.java' '$$Gen.java' \
+		'$$Future.java' '$$Async.java' '$$Super.java' '$$SM.java' \
+		'$$CM.java' '$$Prop.java' '$$MV.java'
 	@touch .compile.stamp
 
 # Create the JAR file from compiled classes
