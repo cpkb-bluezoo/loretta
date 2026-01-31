@@ -954,9 +954,7 @@ void emit_iconst(codegen_ctx_t *ctx, int32_t value)
             emit_u16(ctx, idx);
         }
     }
-    /* Note: Stackmap tracking is NOT done here because emit_iconst is often
-     * followed by operations like anewarray or aastore that consume the int
-     * immediately. Callers that need stackmap tracking should handle it. */
+    /* Track stack depth and stackmap */
     stack_push(ctx, 1);
     if (ctx->stackmap) {
         stackmap_push_int(ctx->stackmap);
@@ -1220,14 +1218,6 @@ void emit_anewarray(codegen_ctx_t *ctx, const char *class_name)
 }
 
 /* Version without stackmap tracking - for use in sequences where caller manages stackmap */
-static void emit_anewarray_no_track(codegen_ctx_t *ctx, const char *class_name)
-{
-    const_pool_t *cp = class_writer_get_cp(ctx->cw);
-    uint16_t idx = cp_add_class(cp, class_name);
-    emit_u8(ctx, OP_ANEWARRAY);
-    emit_u16(ctx, idx);
-}
-
 void emit_checkcast(codegen_ctx_t *ctx, const char *class_name)
 {
     const_pool_t *cp = class_writer_get_cp(ctx->cw);
@@ -4101,6 +4091,17 @@ static void codegen_stmts(codegen_ctx_t *ctx, slist_t *stmts)
 {
     for (slist_t *s = stmts; s; s = s->next) {
         codegen_stmt(ctx, s->data);
+        /* After a statement that always transfers control (return, raise, etc),
+         * we need to record a stackmap frame if there's more code following,
+         * since the JVM verifier requires frames at all reachable targets and
+         * treats the instruction after a terminator as a potential target. */
+        if (s->next && stmt_always_transfers(s->data)) {
+            if (ctx->stackmap) {
+                /* Record a frame at the next instruction offset.
+                 * This frame represents unreachable code, so use empty stack. */
+                stackmap_record_frame(ctx->stackmap, (uint32_t)ctx->code->len);
+            }
+        }
     }
 }
 
@@ -4691,50 +4692,48 @@ static void codegen_function_def(codegen_ctx_t *ctx, ast_node_t *node)
             for (i = num_decorators - 1; i >= 0; i--) {
                 ast_node_t *deco = deco_array[i];
                 
-                /* Pop the function type from stackmap (will be replaced by result) */
-                if (ctx->stackmap) {
-                    stackmap_pop(ctx->stackmap, 1);
-                }
+                /* Store function to temp local to simplify stack management */
+                int temp_slot = codegen_alloc_local(ctx, "$deco_temp");
+                emit_astore(ctx, temp_slot);
+                /* JVM Stack: empty, Stackmap: empty (func stored) */
                 
-                /* Evaluate the decorator expression - this pushes decorator to stackmap */
+                /* Evaluate the decorator expression */
                 codegen_expr(ctx, deco);
+                /* JVM Stack: decorator, Stackmap: [decorator] */
                 
-                /* Now pop decorator from stackmap (we'll manually track the result) */
-                if (ctx->stackmap) {
-                    stackmap_pop(ctx->stackmap, 1);
-                }
-                
-                /* Stack: func, decorator */
-                emit_u8(ctx, OP_SWAP);
-                /* Stack: decorator, func */
-                
-                /* Create single-element array for the function argument */
+                /* Create args array with function as single element */
                 emit_iconst(ctx, 1);
-                emit_anewarray_no_track(ctx, LRT_OBJECT);
-                /* Stack: decorator, func, array */
-                emit_u8(ctx, OP_DUP_X1);
-                /* Stack: decorator, array, func, array */
-                emit_u8(ctx, OP_SWAP);
-                /* Stack: decorator, array, array, func */
+                emit_anewarray(ctx, LRT_OBJECT);
+                /* JVM Stack: decorator, array, Stackmap: [decorator, array] */
+                
+                emit_u8(ctx, OP_DUP);
+                stack_push(ctx, 1);
+                if (ctx->stackmap) {
+                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                    stackmap_push_object(ctx->stackmap, cp, "[L$O;");
+                }
+                /* JVM Stack: decorator, array, array, Stackmap: [decorator, array, array] */
+                
                 emit_iconst(ctx, 0);
-                emit_u8(ctx, OP_SWAP);
-                /* Stack: decorator, array, array, 0, func */
+                /* JVM Stack: decorator, array, array, 0, Stackmap: [decorator, array, array, int] */
+                
+                emit_aload(ctx, temp_slot);
+                /* JVM Stack: decorator, array, array, 0, func, Stackmap: [decorator, array, array, int, func] */
+                
                 emit_u8(ctx, OP_AASTORE);
-                /* Stack: decorator, array */
-                stack_pop(ctx, 3);  /* array, 0, func consumed */
+                stack_pop(ctx, 3);
+                if (ctx->stackmap) {
+                    stackmap_pop(ctx->stackmap, 3);  /* Pop array, int, func */
+                }
+                /* JVM Stack: decorator, array, Stackmap: [decorator, array] */
                 
                 /* Call decorator(func) using invokedynamic */
                 indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache,
                                     PY_INDY_CALL, NULL, 1);
-                /* Don't use stackmap_track_indy here - we're manually managing */
+                stackmap_track_indy(ctx, PY_INDY_CALL);
                 stack_pop(ctx, 2);  /* decorator + array consumed */
                 stack_push(ctx, 1); /* result pushed */
-                
-                /* Push the result type to stackmap - it's a $O now */
-                if (ctx->stackmap) {
-                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
-                    stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
-                }
+                /* JVM Stack: result, Stackmap: [result] */
             }
             
             free(deco_array);
@@ -5049,8 +5048,17 @@ int codegen_module(ast_node_t *ast, analyzer_t *analyzer,
     /* Generate code for each statement */
     codegen_stmts(ctx, ast->data.module.body);
 
-    /* Return from main */
-    emit_u8(ctx, OP_RETURN);
+    /* Return from main - only if not already terminated by return/throw/etc */
+    bool needs_return = true;
+    if (ctx->code->len > 0) {
+        uint8_t last_op = ctx->code->data[ctx->code->len - 1];
+        if (last_op == OP_ARETURN || last_op == OP_RETURN || last_op == OP_ATHROW) {
+            needs_return = false;
+        }
+    }
+    if (needs_return) {
+        emit_u8(ctx, OP_RETURN);
+    }
 
     /* Finalize code attribute */
     codegen_resolve_labels(ctx);
