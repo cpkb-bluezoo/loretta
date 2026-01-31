@@ -30,6 +30,8 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node);
 static void codegen_stmts(codegen_ctx_t *ctx, slist_t *stmts);
 static void codegen_function_def(codegen_ctx_t *ctx, ast_node_t *node);
 static void codegen_lambda(codegen_ctx_t *ctx, ast_node_t *node);
+static void codegen_match_pattern(codegen_ctx_t *ctx, ast_node_t *pattern,
+                                   int subject_slot, label_t *fail_label);
 
 /* Global lambda counter for unique method names */
 static int lambda_counter = 0;
@@ -2894,7 +2896,12 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
 
             /* True branch */
             codegen_stmts(ctx, node->data.if_stmt.body);
-            codegen_emit_jump(ctx, OP_GOTO, end_label);
+            
+            /* Only emit goto if the branch doesn't always transfer control */
+            bool then_transfers = stmts_always_transfer(node->data.if_stmt.body);
+            if (!then_transfers) {
+                codegen_emit_jump(ctx, OP_GOTO, end_label);
+            }
 
             /* Restore state before marking else label - the else branch
              * starts with the same state as when we checked the condition */
@@ -2980,10 +2987,11 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
         /* For loop */
         case AST_FOR: {
             label_t *start_label = codegen_new_label(ctx);
-            label_t *end_label = codegen_new_label(ctx);
+            label_t *end_label = codegen_new_label(ctx);      /* Normal exit (iterator exhausted) */
+            label_t *break_label = codegen_new_label(ctx);    /* Break target (skips else) */
 
-            /* Push loop context */
-            loop_ctx_t loop_ctx = { end_label, start_label };
+            /* Push loop context - break goes to break_label, not end_label */
+            loop_ctx_t loop_ctx = { break_label, start_label };
             ctx->loop_stack = slist_prepend(ctx->loop_stack, &loop_ctx);
 
             /* Get iterator */
@@ -2995,6 +3003,12 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
             /* Store iterator in a temporary */
             int iter_slot = codegen_alloc_local(ctx, "$iter");
             emit_astore(ctx, iter_slot);
+
+            /* Save state before loop - this is the state for break_label */
+            stackmap_state_t *pre_loop_state = NULL;
+            if (ctx->stackmap) {
+                pre_loop_state = stackmap_save_state(ctx->stackmap);
+            }
 
             /* Loop start */
             codegen_mark_label(ctx, start_label);
@@ -3071,7 +3085,7 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                 stackmap_state_free(post_check_state);
             }
 
-            /* End */
+            /* End label - normal loop exit (iterator exhausted) */
             codegen_mark_label(ctx, end_label);
             emit_u8(ctx, OP_POP);  /* Pop the null from iterator */
             stack_pop(ctx, 1);
@@ -3079,8 +3093,27 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                 stackmap_pop(ctx->stackmap, 1);
             }
 
+            /* Execute else clause (only on normal exit, not break) */
             if (node->data.for_stmt.orelse) {
                 codegen_stmts(ctx, node->data.for_stmt.orelse);
+            }
+
+            /* Jump past break_label (fallthrough would need matching state) */
+            label_t *after_break = codegen_new_label(ctx);
+            codegen_emit_jump(ctx, OP_GOTO, after_break);
+
+            /* Restore state and mark break_label - break jumps here with empty stack */
+            if (ctx->stackmap && pre_loop_state) {
+                stackmap_restore_state(ctx->stackmap, pre_loop_state);
+            }
+            codegen_mark_label(ctx, break_label);
+
+            /* Mark after_break - both paths merge here */
+            codegen_mark_label(ctx, after_break);
+
+            /* Clean up saved state */
+            if (pre_loop_state) {
+                stackmap_state_free(pre_loop_state);
             }
 
             /* Pop loop context */
@@ -4078,8 +4111,387 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
             break;
         }
 
+        /* Match statement (Python 3.10+ structural pattern matching) */
+        case AST_MATCH: {
+            ast_node_t *subject = node->data.match_stmt.subject;
+            slist_t *cases = node->data.match_stmt.cases;
+            
+            if (!subject || !cases) break;
+            
+            label_t *end_label = codegen_new_label(ctx);
+            
+            /* Evaluate subject and store in temp local */
+            codegen_expr(ctx, subject);
+            int subject_slot = codegen_alloc_local(ctx, "$match_subject");
+            emit_astore(ctx, subject_slot);
+            
+            /* Save stackmap state after subject stored - all case attempts start here */
+            stackmap_state_t *base_state = NULL;
+            if (ctx->stackmap) {
+                base_state = stackmap_save_state(ctx->stackmap);
+            }
+            
+            /* Process each case */
+            for (slist_t *c = cases; c; c = c->next) {
+                ast_node_t *match_case = c->data;
+                if (!match_case) continue;
+                
+                ast_node_t *pattern = match_case->data.match_case.pattern;
+                ast_node_t *guard = match_case->data.match_case.guard;
+                slist_t *body = match_case->data.match_case.body;
+                
+                label_t *next_case = codegen_new_label(ctx);
+                
+                /* Generate pattern matching code */
+                codegen_match_pattern(ctx, pattern, subject_slot, next_case);
+                
+                /* If guard present, evaluate and check */
+                if (guard) {
+                    codegen_expr(ctx, guard);
+                    indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache,
+                                        PY_INDY_BOOL, NULL, 0);
+                    stackmap_track_indy(ctx, PY_INDY_BOOL);
+                    codegen_emit_jump(ctx, OP_IFEQ, next_case);
+                    stack_pop(ctx, 1);
+                    if (ctx->stackmap) {
+                        stackmap_pop(ctx->stackmap, 1);
+                    }
+                }
+                
+                /* Execute case body */
+                codegen_stmts(ctx, body);
+                
+                /* Jump to end (unless body always transfers) */
+                if (!stmts_always_transfer(body)) {
+                    codegen_emit_jump(ctx, OP_GOTO, end_label);
+                }
+                
+                /* Restore base state before marking next case label */
+                if (ctx->stackmap && base_state) {
+                    stackmap_restore_state(ctx->stackmap, base_state);
+                }
+                
+                /* Mark next case label */
+                codegen_mark_label(ctx, next_case);
+            }
+            
+            /* Clean up saved state */
+            if (base_state) {
+                stackmap_state_free(base_state);
+            }
+            
+            /* End of match */
+            codegen_mark_label(ctx, end_label);
+            break;
+        }
+
         default:
             /* TODO: Handle remaining statement types */
+            break;
+    }
+}
+
+/**
+ * Generate code for pattern matching.
+ * Loads subject from subject_slot, tests against pattern.
+ * Jumps to fail_label if pattern doesn't match.
+ * May bind variables if pattern contains captures.
+ */
+static void codegen_match_pattern(codegen_ctx_t *ctx, ast_node_t *pattern,
+                                   int subject_slot, label_t *fail_label)
+{
+    if (!pattern) return;
+    
+    switch (pattern->type) {
+        /* Wildcard pattern: _ (matches anything) */
+        case AST_MATCH_AS: {
+            ast_node_t *inner = pattern->data.pattern.value;
+            char *name = pattern->data.pattern.name;
+            
+            if (inner == NULL && name == NULL) {
+                /* Wildcard _ - always matches, binds nothing */
+                break;
+            }
+            
+            if (inner == NULL && name != NULL) {
+                /* Capture pattern: name - matches anything, binds to name */
+                emit_aload(ctx, subject_slot);
+                int var_slot = codegen_get_local(ctx, name);
+                if (var_slot < 0) {
+                    var_slot = codegen_alloc_local(ctx, name);
+                }
+                emit_astore(ctx, var_slot);
+                break;
+            }
+            
+            if (inner != NULL) {
+                /* As pattern: pattern as name - match pattern, bind to name */
+                codegen_match_pattern(ctx, inner, subject_slot, fail_label);
+                if (name) {
+                    emit_aload(ctx, subject_slot);
+                    int var_slot = codegen_get_local(ctx, name);
+                    if (var_slot < 0) {
+                        var_slot = codegen_alloc_local(ctx, name);
+                    }
+                    emit_astore(ctx, var_slot);
+                }
+            }
+            break;
+        }
+        
+        /* Literal value pattern */
+        case AST_MATCH_VALUE: {
+            ast_node_t *value = pattern->data.pattern.value;
+            
+            /* Load subject */
+            emit_aload(ctx, subject_slot);
+            stack_push(ctx, 1);
+            if (ctx->stackmap) {
+                const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
+            }
+            
+            /* Evaluate pattern value */
+            codegen_expr(ctx, value);
+            
+            /* Compare using __eq__ */
+            indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache,
+                                PY_INDY_EQ, NULL, 0);
+            stackmap_track_indy(ctx, PY_INDY_EQ);
+            stack_pop(ctx, 2);
+            stack_push(ctx, 1);
+            
+            /* Convert to boolean and branch */
+            indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache,
+                                PY_INDY_BOOL, NULL, 0);
+            stackmap_track_indy(ctx, PY_INDY_BOOL);
+            
+            codegen_emit_jump(ctx, OP_IFEQ, fail_label);
+            stack_pop(ctx, 1);
+            if (ctx->stackmap) {
+                stackmap_pop(ctx->stackmap, 1);
+            }
+            break;
+        }
+        
+        /* Singleton pattern (True, False, None) */
+        case AST_MATCH_SINGLETON: {
+            ast_node_t *value = pattern->data.pattern.value;
+            
+            /* Load subject */
+            emit_aload(ctx, subject_slot);
+            stack_push(ctx, 1);
+            if (ctx->stackmap) {
+                const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
+            }
+            
+            /* Evaluate pattern value */
+            codegen_expr(ctx, value);
+            
+            /* Use identity comparison (is) for singletons */
+            indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache,
+                                PY_INDY_IS, NULL, 0);
+            stackmap_track_indy(ctx, PY_INDY_IS);
+            stack_pop(ctx, 2);
+            stack_push(ctx, 1);
+            
+            /* Convert to boolean and branch */
+            indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache,
+                                PY_INDY_BOOL, NULL, 0);
+            stackmap_track_indy(ctx, PY_INDY_BOOL);
+            
+            codegen_emit_jump(ctx, OP_IFEQ, fail_label);
+            stack_pop(ctx, 1);
+            if (ctx->stackmap) {
+                stackmap_pop(ctx->stackmap, 1);
+            }
+            break;
+        }
+        
+        /* Or pattern: pattern1 | pattern2 | ...
+         * Try each alternative. If any matches, continue.
+         * Only fail to fail_label if ALL alternatives fail. */
+        case AST_MATCH_OR: {
+            slist_t *patterns = pattern->data.pattern.patterns;
+            label_t *matched_label = codegen_new_label(ctx);
+            
+            /* Save state before or pattern - all alternatives should start from here */
+            stackmap_state_t *or_state = NULL;
+            if (ctx->stackmap) {
+                or_state = stackmap_save_state(ctx->stackmap);
+            }
+            
+            int count = 0;
+            int total = slist_length(patterns);
+            
+            for (slist_t *p = patterns; p; p = p->next, count++) {
+                ast_node_t *alt = p->data;
+                bool is_last = (count == total - 1);
+                
+                if (is_last) {
+                    /* Last alternative - if this fails, entire or-pattern fails */
+                    codegen_match_pattern(ctx, alt, subject_slot, fail_label);
+                    /* If we get here, it matched - fall through to matched_label */
+                } else {
+                    /* Not last - if this alternative fails, try next one */
+                    label_t *try_next = codegen_new_label(ctx);
+                    codegen_match_pattern(ctx, alt, subject_slot, try_next);
+                    /* If we get here, it matched - jump to matched_label */
+                    codegen_emit_jump(ctx, OP_GOTO, matched_label);
+                    
+                    /* Restore state before marking try_next and trying next alternative */
+                    if (ctx->stackmap && or_state) {
+                        stackmap_restore_state(ctx->stackmap, or_state);
+                    }
+                    codegen_mark_label(ctx, try_next);
+                }
+            }
+            
+            /* Restore state for matched_label too */
+            if (ctx->stackmap && or_state) {
+                stackmap_restore_state(ctx->stackmap, or_state);
+            }
+            
+            if (or_state) {
+                stackmap_state_free(or_state);
+            }
+            
+            codegen_mark_label(ctx, matched_label);
+            break;
+        }
+        
+        /* Sequence pattern: [x, y] or (x, y) */
+        case AST_MATCH_SEQUENCE: {
+            slist_t *patterns = pattern->data.pattern.patterns;
+            int num_patterns = slist_length(patterns);
+            
+            /* Check length using len() and compare */
+            /* Build: len(subject) == num_patterns */
+            emit_ldc_string(ctx, "len");
+            emit_invokestatic(ctx, "$G", "builtin", "(Ljava/lang/String;)L$O;");
+            stack_push(ctx, 1);
+            if (ctx->stackmap) {
+                const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
+            }
+            
+            /* Create args array with subject */
+            emit_iconst(ctx, 1);
+            emit_anewarray(ctx, LRT_OBJECT);
+            emit_u8(ctx, OP_DUP);
+            emit_iconst(ctx, 0);
+            emit_aload(ctx, subject_slot);
+            emit_u8(ctx, OP_AASTORE);
+            stack_push(ctx, 1);
+            if (ctx->stackmap) {
+                const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                stackmap_push_object(ctx->stackmap, cp, "[L$O;");
+            }
+            
+            /* Call len(subject) */
+            indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache,
+                                PY_INDY_CALL, NULL, 1);
+            stackmap_track_indy(ctx, PY_INDY_CALL);
+            stack_pop(ctx, 2);
+            stack_push(ctx, 1);
+            
+            /* Compare with expected length */
+            emit_py_int(ctx, num_patterns);
+            indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache,
+                                PY_INDY_EQ, NULL, 0);
+            stackmap_track_indy(ctx, PY_INDY_EQ);
+            stack_pop(ctx, 2);
+            stack_push(ctx, 1);
+            
+            indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache,
+                                PY_INDY_BOOL, NULL, 0);
+            stackmap_track_indy(ctx, PY_INDY_BOOL);
+            
+            codegen_emit_jump(ctx, OP_IFEQ, fail_label);
+            stack_pop(ctx, 1);
+            if (ctx->stackmap) {
+                stackmap_pop(ctx->stackmap, 1);
+            }
+            
+            /* Match each element */
+            int idx = 0;
+            for (slist_t *p = patterns; p; p = p->next, idx++) {
+                ast_node_t *elem_pat = p->data;
+                
+                /* Skip star patterns for now */
+                if (elem_pat->type == AST_MATCH_STAR) {
+                    continue;
+                }
+                
+                /* Get element: subject[idx] and store in temp */
+                emit_aload(ctx, subject_slot);
+                stack_push(ctx, 1);
+                if (ctx->stackmap) {
+                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                    stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
+                }
+                emit_py_int(ctx, idx);
+                indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache,
+                                    PY_INDY_GETITEM, NULL, 0);
+                stackmap_track_indy(ctx, PY_INDY_GETITEM);
+                stack_pop(ctx, 2);
+                stack_push(ctx, 1);
+                
+                int elem_slot = codegen_alloc_local(ctx, "$match_elem");
+                emit_astore(ctx, elem_slot);
+                
+                codegen_match_pattern(ctx, elem_pat, elem_slot, fail_label);
+            }
+            break;
+        }
+        
+        /* Class pattern: ClassName(x, y) */
+        case AST_MATCH_CLASS: {
+            ast_node_t *cls = pattern->data.pattern.value;
+            slist_t *patterns = pattern->data.pattern.patterns;
+            
+            /* First check isinstance(subject, cls) */
+            emit_aload(ctx, subject_slot);
+            stack_push(ctx, 1);
+            if (ctx->stackmap) {
+                const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
+            }
+            
+            codegen_expr(ctx, cls);
+            
+            /* Call isinstance */
+            emit_invokestatic(ctx, "$BS", "isinstance", "(L$O;L$O;)Z");
+            stack_pop(ctx, 1);
+            if (ctx->stackmap) {
+                stackmap_pop(ctx->stackmap, 2);
+                stackmap_push_int(ctx->stackmap);
+            }
+            
+            codegen_emit_jump(ctx, OP_IFEQ, fail_label);
+            stack_pop(ctx, 1);
+            if (ctx->stackmap) {
+                stackmap_pop(ctx->stackmap, 1);
+            }
+            
+            /* TODO: Match positional arguments via __match_args__ */
+            /* For now, just check isinstance */
+            (void)patterns;
+            break;
+        }
+        
+        /* Star pattern: *rest (used in sequences) */
+        case AST_MATCH_STAR:
+            /* Handled in sequence pattern */
+            break;
+        
+        /* Mapping pattern: {key: pattern, ...} */
+        case AST_MATCH_MAPPING:
+            /* TODO: Implement mapping pattern matching */
+            break;
+        
+        default:
             break;
     }
 }

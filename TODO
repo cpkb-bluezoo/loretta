@@ -382,11 +382,10 @@ PLANNED - Module System
 KNOWN ISSUES
 ------------
 
-[ ] Module-level for loops
-    - For loop target variable not correctly assigned at module level
-    - Variables should be stored in globals at module level
-    - Workaround: wrap in a function
-    - Affects: unpack_test, stmt_test, comp_test, expr_test
+[x] Module-level for loops - FIXED
+    - For loop target variables now correctly stored in globals
+    - break/continue in for loops work correctly with proper stackmap frames
+    - Fixed dead code emission after break/continue/return in if statements
 
 [x] StackMapTable generation - FIXED
     - All tests now pass without -noverify
@@ -433,15 +432,21 @@ FUTURE CONSIDERATIONS
     This is how Jython achieves reasonable performance. Consider prioritizing this
     optimization once the core language features are complete.
 
-[ ] Python compatibility
+[ ] Python compatibility - remaining features
     - __slots__
     - Metaclasses
-    - Descriptors (property, classmethod, staticmethod)
     - Multiple inheritance with C3 MRO
-    - __getattr__/__setattr__/__delattr__
-    - Context managers (__enter__/__exit__)
-    - Iterators and generators
-    - Async/await and coroutines
+    
+[x] Python compatibility - implemented
+    - Descriptors (property, classmethod, staticmethod) - see line 317
+    - __getattr__/__setattr__/__delattr__ - in $O, $Inst, etc.
+    - Context managers (__enter__/__exit__) - see line 207
+    - Iterators and generators (yield, yield from) - see line 153, 309
+    - Async/await with virtual threads ($Async.java, $Future.java)
+      * Uses Java 21 virtual threads for true concurrency
+      * gather(), sleep(), run() for asyncio-like API
+      * Virtual threads yield carrier threads on blocking
+    - Match/case structural pattern matching - literals, captures, or, guards, sequences
 
 [ ] Java interop
     - Calling Java methods from Python
