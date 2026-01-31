@@ -391,7 +391,7 @@ class $LI extends $O {
     @Override
     public $O __next__() {
         if (index >= list.items.size()) {
-            throw new $X("StopIteration", "");
+            throw new $X.StopIteration();
         }
         return list.items.get(index++);
     }

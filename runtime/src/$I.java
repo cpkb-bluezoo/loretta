@@ -216,11 +216,11 @@ public class $I extends $O {
         if (other instanceof $I) {
             $I o = ($I) other;
             double d = o.isBig() ? o.big.doubleValue() : o.value;
-            if (d == 0) throw new $X("ZeroDivisionError", "division by zero");
+            if (d == 0) throw new $X.ZeroDivisionError();
             return $F.of((isBig() ? big.doubleValue() : value) / d);
         }
         if (other instanceof $F) {
-            if ((($F)other).value == 0) throw new $X("ZeroDivisionError", "division by zero");
+            if ((($F)other).value == 0) throw new $X.ZeroDivisionError();
             return $F.of((isBig() ? big.doubleValue() : value) / (($F)other).value);
         }
         throw new $X("TypeError", "unsupported operand type(s) for /");
@@ -232,14 +232,14 @@ public class $I extends $O {
             $I o = ($I) other;
             if (isBig() || o.isBig()) {
                 BigInteger ob = o.toBigInteger();
-                if (ob.equals(BigInteger.ZERO)) throw new $X("ZeroDivisionError", "division by zero");
+                if (ob.equals(BigInteger.ZERO)) throw new $X.ZeroDivisionError();
                 return of(toBigInteger().divide(ob));
             }
-            if (o.value == 0) throw new $X("ZeroDivisionError", "division by zero");
+            if (o.value == 0) throw new $X.ZeroDivisionError();
             return of(Math.floorDiv(value, o.value));
         }
         if (other instanceof $F) {
-            if ((($F)other).value == 0) throw new $X("ZeroDivisionError", "division by zero");
+            if ((($F)other).value == 0) throw new $X.ZeroDivisionError();
             return $F.of(Math.floor((isBig() ? big.doubleValue() : value) / (($F)other).value));
         }
         throw new $X("TypeError", "unsupported operand type(s) for //");
@@ -251,10 +251,10 @@ public class $I extends $O {
             $I o = ($I) other;
             if (isBig() || o.isBig()) {
                 BigInteger ob = o.toBigInteger();
-                if (ob.equals(BigInteger.ZERO)) throw new $X("ZeroDivisionError", "modulo by zero");
+                if (ob.equals(BigInteger.ZERO)) throw new $X.ZeroDivisionError("modulo by zero");
                 return of(toBigInteger().mod(ob.abs()));
             }
-            if (o.value == 0) throw new $X("ZeroDivisionError", "modulo by zero");
+            if (o.value == 0) throw new $X.ZeroDivisionError("modulo by zero");
             return of(Math.floorMod(value, o.value));
         }
         throw new $X("TypeError", "unsupported operand type(s) for %");

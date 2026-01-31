@@ -398,7 +398,12 @@ void stackmap_record_frame(stack_map_table_t *smt, uint16_t offset)
     /* Check for existing frame at this offset */
     for (stack_map_frame_t *f = smt->frames; f; f = f->next) {
         if (f->offset == offset) {
-            /* Join point: update to use minimum locals count */
+            /* Join point: update locals and stack to current state.
+             * This handles the case where an exception handler label
+             * is at the same offset as another label. The exception
+             * handler's stack state ($X) should take precedence. */
+            
+            /* Update locals to minimum count */
             if (smt->current_locals_count < f->num_locals) {
                 f->num_locals = smt->current_locals_count;
                 if (f->num_locals > 0) {
@@ -413,6 +418,20 @@ void stackmap_record_frame(stack_map_table_t *smt, uint16_t offset)
                     free(f->locals);
                     f->locals = NULL;
                 }
+            }
+            
+            /* Also update stack - needed for exception handlers where
+             * the same offset may be recorded with different stack states */
+            free(f->stack);
+            f->stack_size = smt->current_stack_size;
+            if (f->stack_size > 0) {
+                f->stack = malloc(f->stack_size * sizeof(verification_type_t));
+                if (f->stack) {
+                    memcpy(f->stack, smt->current_stack,
+                           f->stack_size * sizeof(verification_type_t));
+                }
+            } else {
+                f->stack = NULL;
             }
             return;
         }

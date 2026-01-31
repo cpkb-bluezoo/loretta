@@ -29,7 +29,9 @@ JAVA_SOURCES = \
 	$(SRC_DIR)/$$Cls.java $(SRC_DIR)/$$Inst.java $(SRC_DIR)/$$Mod.java \
 	$(SRC_DIR)/$$Gen.java $(SRC_DIR)/$$Future.java $(SRC_DIR)/$$Async.java \
 	$(SRC_DIR)/$$Super.java $(SRC_DIR)/$$SM.java $(SRC_DIR)/$$CM.java \
-	$(SRC_DIR)/$$Prop.java $(SRC_DIR)/$$MV.java
+	$(SRC_DIR)/$$Prop.java $(SRC_DIR)/$$MV.java $(SRC_DIR)/$$Sys.java \
+	$(SRC_DIR)/_posix.java $(SRC_DIR)/_collections.java $(SRC_DIR)/_sre.java \
+	$(SRC_DIR)/_io.java $(SRC_DIR)/_socket.java
 
 # Compile all Java files - use shell glob with quotes to handle $ in filenames
 # Touch stamp file to track compilation time
@@ -41,7 +43,8 @@ JAVA_SOURCES = \
 		'$$ST.java' '$$FS.java' '$$File.java' '$$SL.java' '$$BM.java' \
 		'$$GE.java' '$$Cls.java' '$$Inst.java' '$$Mod.java' '$$Gen.java' \
 		'$$Future.java' '$$Async.java' '$$Super.java' '$$SM.java' \
-		'$$CM.java' '$$Prop.java' '$$MV.java'
+		'$$CM.java' '$$Prop.java' '$$MV.java' '$$Sys.java' \
+		'_posix.java' '_collections.java' '_sre.java' '_io.java' '_socket.java'
 	@touch .compile.stamp
 
 # Create the JAR file from compiled classes

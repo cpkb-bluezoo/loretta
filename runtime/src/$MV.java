@@ -228,7 +228,7 @@ class $MVI extends $O {
     @Override
     public $O __next__() {
         if (idx >= (int)mv.__len__().value) {
-            throw new $X("StopIteration", "");
+            throw new $X.StopIteration();
         }
         return mv.__getitem__($I.of(idx++));
     }

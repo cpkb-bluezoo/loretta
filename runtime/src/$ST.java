@@ -278,7 +278,7 @@ class $STI extends $O {
     @Override
     public $O __next__() {
         if (!iter.hasNext()) {
-            throw new $X("StopIteration", "");
+            throw new $X.StopIteration();
         }
         return iter.next();
     }

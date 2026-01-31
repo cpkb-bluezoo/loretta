@@ -18,6 +18,12 @@ public final class $Mod extends $O {
     /** Whether __init__ has been run */
     private boolean initialized;
     
+    /** Source file path (for __file__ attribute) */
+    private String filePath;
+    
+    /** Package name (for __package__ attribute) */
+    private String packageName;
+    
     /**
      * Create a new module.
      */
@@ -26,6 +32,9 @@ public final class $Mod extends $O {
         this.attrs = new $D();
         this.javaClass = null;
         this.initialized = false;
+        this.filePath = null;
+        this.packageName = "";
+        setupModuleAttrs();
     }
     
     /**
@@ -36,6 +45,56 @@ public final class $Mod extends $O {
         this.attrs = new $D();
         this.javaClass = javaClass;
         this.initialized = false;
+        this.packageName = "";
+        
+        // Derive package name from module name
+        int lastDot = name.lastIndexOf('.');
+        if (lastDot > 0) {
+            this.packageName = name.substring(0, lastDot);
+        }
+        
+        // Try to find the source file
+        if (javaClass != null) {
+            // Use the class location as a proxy for the file
+            try {
+                java.security.CodeSource cs = javaClass.getProtectionDomain().getCodeSource();
+                if (cs != null && cs.getLocation() != null) {
+                    this.filePath = cs.getLocation().getPath() + "/" + 
+                                    name.replace('.', '/') + ".class";
+                }
+            } catch (Exception e) {
+                this.filePath = "<compiled>";
+            }
+        }
+        setupModuleAttrs();
+    }
+    
+    /**
+     * Set up standard module attributes.
+     */
+    private void setupModuleAttrs() {
+        attrs.__setitem__($S.of("__name__"), $S.of(name));
+        attrs.__setitem__($S.of("__package__"), packageName.isEmpty() ? $N.INSTANCE : $S.of(packageName));
+        attrs.__setitem__($S.of("__file__"), filePath != null ? $S.of(filePath) : $N.INSTANCE);
+        attrs.__setitem__($S.of("__doc__"), $N.INSTANCE);
+        attrs.__setitem__($S.of("__loader__"), $N.INSTANCE);
+        attrs.__setitem__($S.of("__spec__"), $N.INSTANCE);
+    }
+    
+    /**
+     * Set the file path for this module.
+     */
+    public void setFilePath(String path) {
+        this.filePath = path;
+        attrs.__setitem__($S.of("__file__"), path != null ? $S.of(path) : $N.INSTANCE);
+    }
+    
+    /**
+     * Set the package name for this module.
+     */
+    public void setPackage(String pkg) {
+        this.packageName = pkg != null ? pkg : "";
+        attrs.__setitem__($S.of("__package__"), packageName.isEmpty() ? $N.INSTANCE : $S.of(packageName));
     }
     
     /**

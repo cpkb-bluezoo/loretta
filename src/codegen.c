@@ -136,6 +136,35 @@ static void stackmap_track_indy(codegen_ctx_t *ctx, py_indy_op_t op)
             stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
             break;
 
+        /* Delitem: pop 2 $O (obj, key), push nothing */
+        case PY_INDY_DELITEM:
+            stackmap_pop(ctx->stackmap, 2);
+            break;
+
+        /* STR: pop 1 $O, push 1 $S (Python string) */
+        case PY_INDY_STR:
+            stackmap_pop(ctx->stackmap, 1);
+            stackmap_push_object(ctx->stackmap, cp, LRT_STR);
+            break;
+
+        /* REPR: pop 1 $O, push 1 $S (Python string) */
+        case PY_INDY_REPR:
+            stackmap_pop(ctx->stackmap, 1);
+            stackmap_push_object(ctx->stackmap, cp, LRT_STR);
+            break;
+
+        /* LEN: pop 1 $O, push 1 $I (Python int) */
+        case PY_INDY_LEN:
+            stackmap_pop(ctx->stackmap, 1);
+            stackmap_push_object(ctx->stackmap, cp, LRT_INT);
+            break;
+
+        /* HASH: pop 1 $O, push 1 $I (Python int) */
+        case PY_INDY_HASH:
+            stackmap_pop(ctx->stackmap, 1);
+            stackmap_push_object(ctx->stackmap, cp, LRT_INT);
+            break;
+
         default:
             break;
     }
@@ -687,6 +716,90 @@ static bool is_generator_function(slist_t *body)
     return contains_yield_stmts(body);
 }
 
+/* Forward declaration */
+static bool stmts_always_transfer(slist_t *stmts);
+
+/**
+ * Check if a statement always transfers control (never falls through).
+ * Used to avoid emitting dead code after throw/return/break/continue.
+ */
+static bool stmt_always_transfers(ast_node_t *stmt)
+{
+    if (!stmt) {
+        return false;
+    }
+
+    switch (stmt->type) {
+        case AST_RETURN:
+        case AST_RAISE:
+        case AST_BREAK:
+        case AST_CONTINUE:
+            return true;
+
+        case AST_IF:
+            /* If both branches always transfer, the if statement does too */
+            if (stmt->data.if_stmt.orelse) {
+                bool then_transfers = stmts_always_transfer(stmt->data.if_stmt.body);
+                bool else_transfers = stmts_always_transfer(stmt->data.if_stmt.orelse);
+                return then_transfers && else_transfers;
+            }
+            return false;
+
+        case AST_TRY: {
+            /* Try/except transfers if both try body and all handlers transfer */
+            bool body_transfers = stmts_always_transfer(stmt->data.try_stmt.body);
+            bool all_handlers_transfer = true;
+
+            /* Check all exception handlers */
+            for (slist_t *h = stmt->data.try_stmt.handlers; h; h = h->next) {
+                ast_node_t *handler = h->data;
+                if (handler) {
+                    if (!stmts_always_transfer(handler->data.except_handler.body)) {
+                        all_handlers_transfer = false;
+                        break;
+                    }
+                }
+            }
+
+            /* If body always throws and all handlers always transfer, try/except transfers */
+            if (body_transfers && all_handlers_transfer) {
+                return true;
+            }
+
+            /* If body can complete normally, check if it falls through
+             * (ignoring exception case) */
+            return false;
+        }
+
+        case AST_WHILE:
+            /* While with no break and condition that's always true never falls through
+             * But this is hard to detect, so be conservative */
+            return false;
+
+        default:
+            return false;
+    }
+}
+
+/**
+ * Check if a statement list always transfers control (never falls through).
+ */
+static bool stmts_always_transfer(slist_t *stmts)
+{
+    if (!stmts) {
+        return false;
+    }
+
+    /* Check each statement - any one that always transfers makes the whole list transfer */
+    for (slist_t *s = stmts; s; s = s->next) {
+        if (stmt_always_transfers(s->data)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 /* ========================================================================
  * Local variable management
  * ======================================================================== */
@@ -796,6 +909,9 @@ void stack_push(codegen_ctx_t *ctx, int count)
 void stack_pop(codegen_ctx_t *ctx, int count)
 {
     ctx->stack_depth -= count;
+    if (ctx->stack_depth < 0) {
+        ctx->stack_depth = 0;
+    }
 }
 
 /* ========================================================================
@@ -838,6 +954,9 @@ void emit_iconst(codegen_ctx_t *ctx, int32_t value)
             emit_u16(ctx, idx);
         }
     }
+    /* Note: Stackmap tracking is NOT done here because emit_iconst is often
+     * followed by operations like anewarray or aastore that consume the int
+     * immediately. Callers that need stackmap tracking should handle it. */
     stack_push(ctx, 1);
     if (ctx->stackmap) {
         stackmap_push_int(ctx->stackmap);
@@ -1100,6 +1219,15 @@ void emit_anewarray(codegen_ctx_t *ctx, const char *class_name)
     }
 }
 
+/* Version without stackmap tracking - for use in sequences where caller manages stackmap */
+static void emit_anewarray_no_track(codegen_ctx_t *ctx, const char *class_name)
+{
+    const_pool_t *cp = class_writer_get_cp(ctx->cw);
+    uint16_t idx = cp_add_class(cp, class_name);
+    emit_u8(ctx, OP_ANEWARRAY);
+    emit_u16(ctx, idx);
+}
+
 void emit_checkcast(codegen_ctx_t *ctx, const char *class_name)
 {
     const_pool_t *cp = class_writer_get_cp(ctx->cw);
@@ -1276,6 +1404,13 @@ static void codegen_comprehension_loop(codegen_ctx_t *ctx, slist_t *generators,
     if (!generators) {
         /* Base case: evaluate element and add to result */
         emit_aload(ctx, result_slot);
+        /* Fix the pushed type to match the actual collection type */
+        if (ctx->stackmap) {
+            const_pool_t *cp = class_writer_get_cp(ctx->cw);
+            stackmap_pop(ctx->stackmap, 1);  /* Remove the $O that emit_aload pushed */
+            stackmap_push_object(ctx->stackmap, cp,
+                                 comp_type == COMP_LIST ? LRT_LIST : LRT_SET);
+        }
 
         codegen_expr(ctx, elt);
 
@@ -1286,6 +1421,9 @@ static void codegen_comprehension_loop(codegen_ctx_t *ctx, slist_t *generators,
             emit_invokevirtual(ctx, LRT_SET, "add", "(" DESC_OBJECT ")V");
         }
         stack_pop(ctx, 2);
+        if (ctx->stackmap) {
+            stackmap_pop(ctx->stackmap, 2);
+        }
         return;
     }
 
@@ -1315,10 +1453,20 @@ static void codegen_comprehension_loop(codegen_ctx_t *ctx, slist_t *generators,
     /* Check for null (end of iteration) */
     emit_u8(ctx, OP_DUP);
     stack_push(ctx, 1);
+    if (ctx->stackmap) {
+        const_pool_t *cp = class_writer_get_cp(ctx->cw);
+        stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
+    }
     codegen_emit_jump(ctx, OP_IFNULL, loop_end);
     stack_pop(ctx, 1);
     if (ctx->stackmap) {
         stackmap_pop(ctx->stackmap, 1);
+    }
+
+    /* Save state for loop_end - when IFNULL jumps here, stack has one item (the null) */
+    stackmap_state_t *loop_end_state = NULL;
+    if (ctx->stackmap) {
+        loop_end_state = stackmap_save_state(ctx->stackmap);
     }
 
     /* Bind target variable */
@@ -1332,6 +1480,9 @@ static void codegen_comprehension_loop(codegen_ctx_t *ctx, slist_t *generators,
         /* TODO: Handle tuple unpacking in comprehensions */
         emit_u8(ctx, OP_POP);
         stack_pop(ctx, 1);
+        if (ctx->stackmap) {
+            stackmap_pop(ctx->stackmap, 1);
+        }
     }
 
     /* Evaluate filter conditions */
@@ -1360,6 +1511,12 @@ static void codegen_comprehension_loop(codegen_ctx_t *ctx, slist_t *generators,
 
     /* Loop back */
     codegen_emit_jump(ctx, OP_GOTO, loop_start);
+
+    /* Restore state for loop_end - this is the state when IFNULL jumps here */
+    if (ctx->stackmap && loop_end_state) {
+        stackmap_restore_state(ctx->stackmap, loop_end_state);
+        stackmap_state_free(loop_end_state);
+    }
 
     /* End of loop - pop the null */
     codegen_mark_label(ctx, loop_end);
@@ -1416,10 +1573,20 @@ static void codegen_dict_comprehension_loop(codegen_ctx_t *ctx, slist_t *generat
     /* Check for null */
     emit_u8(ctx, OP_DUP);
     stack_push(ctx, 1);
+    if (ctx->stackmap) {
+        const_pool_t *cp = class_writer_get_cp(ctx->cw);
+        stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
+    }
     codegen_emit_jump(ctx, OP_IFNULL, loop_end);
     stack_pop(ctx, 1);
     if (ctx->stackmap) {
         stackmap_pop(ctx->stackmap, 1);
+    }
+
+    /* Save state for loop_end - when IFNULL jumps here, stack has one item (the null) */
+    stackmap_state_t *loop_end_state = NULL;
+    if (ctx->stackmap) {
+        loop_end_state = stackmap_save_state(ctx->stackmap);
     }
 
     /* Bind target variable */
@@ -1432,6 +1599,9 @@ static void codegen_dict_comprehension_loop(codegen_ctx_t *ctx, slist_t *generat
     } else {
         emit_u8(ctx, OP_POP);
         stack_pop(ctx, 1);
+        if (ctx->stackmap) {
+            stackmap_pop(ctx->stackmap, 1);
+        }
     }
 
     /* Evaluate filter conditions */
@@ -1461,10 +1631,19 @@ static void codegen_dict_comprehension_loop(codegen_ctx_t *ctx, slist_t *generat
     /* Loop back */
     codegen_emit_jump(ctx, OP_GOTO, loop_start);
 
+    /* Restore state for loop_end - this is the state when IFNULL jumps here */
+    if (ctx->stackmap && loop_end_state) {
+        stackmap_restore_state(ctx->stackmap, loop_end_state);
+        stackmap_state_free(loop_end_state);
+    }
+
     /* End of loop - pop the null */
     codegen_mark_label(ctx, loop_end);
     emit_u8(ctx, OP_POP);
     stack_pop(ctx, 1);
+    if (ctx->stackmap) {
+        stackmap_pop(ctx->stackmap, 1);
+    }
     if (ctx->stackmap) {
         stackmap_pop(ctx->stackmap, 1);
     }
@@ -1522,6 +1701,12 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
                 emit_ldc_string(ctx, name);
                 emit_invokestatic(ctx, "$G", "builtin",
                                   "(Ljava/lang/String;)" DESC_OBJECT);
+                /* Stack: String -> $O (no count change, but type changes) */
+                if (ctx->stackmap) {
+                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                    stackmap_pop(ctx->stackmap, 1);
+                    stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
+                }
                 break;
             }
 
@@ -1546,6 +1731,12 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
                 emit_ldc_string(ctx, name);
                 emit_invokestatic(ctx, "$G", "builtin",
                                   "(Ljava/lang/String;)" DESC_OBJECT);
+                /* Stack: String -> $O (no count change, but type changes) */
+                if (ctx->stackmap) {
+                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                    stackmap_pop(ctx->stackmap, 1);
+                    stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
+                }
                 break;
             }
 
@@ -1569,13 +1760,24 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
                     emit_ldc_string(ctx, name);
                     emit_invokestatic(ctx, "$G", "builtin",
                                       "(Ljava/lang/String;)" DESC_OBJECT);
+                    /* Stack: String -> $O (no count change, but type changes) */
+                    if (ctx->stackmap) {
+                        const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                        stackmap_pop(ctx->stackmap, 1);
+                        stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
+                    }
                 }
             } else {
                 /* Global/built-in lookup via $G.builtin(name) */
                 emit_ldc_string(ctx, name);
                 emit_invokestatic(ctx, "$G", "builtin",
                                   "(Ljava/lang/String;)" DESC_OBJECT);
-                /* Stack: String -> $O */
+                /* Stack: String -> $O (no count change, but type changes) */
+                if (ctx->stackmap) {
+                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                    stackmap_pop(ctx->stackmap, 1);
+                    stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
+                }
             }
             break;
         }
@@ -1874,9 +2076,22 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
                 stackmap_pop(ctx->stackmap, 1);
             }
 
+            /* Save stackmap state after condition for else branch target */
+            stackmap_state_t *pre_branch_state = NULL;
+            if (ctx->stackmap) {
+                pre_branch_state = stackmap_save_state(ctx->stackmap);
+            }
+
             /* True branch */
             codegen_expr(ctx, node->data.if_exp.body);
             codegen_emit_jump(ctx, OP_GOTO, end_label);
+
+            /* Restore state before marking else label - the else branch
+             * starts with the same state as when we checked the condition */
+            if (ctx->stackmap && pre_branch_state) {
+                stackmap_restore_state(ctx->stackmap, pre_branch_state);
+                stackmap_state_free(pre_branch_state);
+            }
 
             /* False branch */
             codegen_mark_label(ctx, else_label);
@@ -2157,19 +2372,37 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
             slist_t *generators = node->data.comprehension_expr.generators;
 
             /* Create empty list and store in temp local */
-            emit_new(ctx, LRT_LIST);
+            const_pool_t *cp = class_writer_get_cp(ctx->cw);
+            uint16_t new_offset = ctx->code->len;
+            emit_new(ctx, LRT_LIST);  /* emit_new already pushes uninitialized to stackmap */
             emit_u8(ctx, OP_DUP);
             stack_push(ctx, 1);
+            if (ctx->stackmap) {
+                stackmap_push_uninitialized(ctx->stackmap, new_offset);
+            }
             emit_invokespecial(ctx, LRT_LIST, "<init>", "()V");
             stack_pop(ctx, 1);
+            if (ctx->stackmap) {
+                stackmap_pop(ctx->stackmap, 1);
+                stackmap_init_object(ctx->stackmap, new_offset, cp, LRT_LIST);
+            }
             int result_slot = codegen_alloc_local(ctx, "$comp_result");
             emit_astore(ctx, result_slot);
+            /* Fix the local type to be $L, not $O */
+            if (ctx->stackmap) {
+                stackmap_set_local_object(ctx->stackmap, result_slot, cp, LRT_LIST);
+            }
 
             /* Process each generator (nested loops) */
             codegen_comprehension_loop(ctx, generators, elt, result_slot, COMP_LIST);
 
             /* Load result */
             emit_aload(ctx, result_slot);
+            /* Fix the pushed type to be $L */
+            if (ctx->stackmap) {
+                stackmap_pop(ctx->stackmap, 1);
+                stackmap_push_object(ctx->stackmap, cp, LRT_LIST);
+            }
             break;
         }
 
@@ -2179,19 +2412,37 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
             slist_t *generators = node->data.comprehension_expr.generators;
 
             /* Create empty set and store in temp local */
-            emit_new(ctx, LRT_SET);
+            const_pool_t *cp = class_writer_get_cp(ctx->cw);
+            uint16_t new_offset = ctx->code->len;
+            emit_new(ctx, LRT_SET);  /* emit_new already pushes uninitialized to stackmap */
             emit_u8(ctx, OP_DUP);
             stack_push(ctx, 1);
+            if (ctx->stackmap) {
+                stackmap_push_uninitialized(ctx->stackmap, new_offset);
+            }
             emit_invokespecial(ctx, LRT_SET, "<init>", "()V");
             stack_pop(ctx, 1);
+            if (ctx->stackmap) {
+                stackmap_pop(ctx->stackmap, 1);
+                stackmap_init_object(ctx->stackmap, new_offset, cp, LRT_SET);
+            }
             int result_slot = codegen_alloc_local(ctx, "$comp_result");
             emit_astore(ctx, result_slot);
+            /* Fix the local type to be $Set, not $O */
+            if (ctx->stackmap) {
+                stackmap_set_local_object(ctx->stackmap, result_slot, cp, LRT_SET);
+            }
 
             /* Process each generator */
             codegen_comprehension_loop(ctx, generators, elt, result_slot, COMP_SET);
 
             /* Load result */
             emit_aload(ctx, result_slot);
+            /* Fix the pushed type to be $Set */
+            if (ctx->stackmap) {
+                stackmap_pop(ctx->stackmap, 1);
+                stackmap_push_object(ctx->stackmap, cp, LRT_SET);
+            }
             break;
         }
 
@@ -2202,19 +2453,37 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
             slist_t *generators = node->data.dict_comp.generators;
 
             /* Create empty dict and store in temp local */
-            emit_new(ctx, LRT_DICT);
+            const_pool_t *cp = class_writer_get_cp(ctx->cw);
+            uint16_t new_offset = ctx->code->len;
+            emit_new(ctx, LRT_DICT);  /* emit_new already pushes uninitialized to stackmap */
             emit_u8(ctx, OP_DUP);
             stack_push(ctx, 1);
+            if (ctx->stackmap) {
+                stackmap_push_uninitialized(ctx->stackmap, new_offset);
+            }
             emit_invokespecial(ctx, LRT_DICT, "<init>", "()V");
             stack_pop(ctx, 1);
+            if (ctx->stackmap) {
+                stackmap_pop(ctx->stackmap, 1);
+                stackmap_init_object(ctx->stackmap, new_offset, cp, LRT_DICT);
+            }
             int result_slot = codegen_alloc_local(ctx, "$comp_result");
             emit_astore(ctx, result_slot);
+            /* Fix the local type to be $D, not $O */
+            if (ctx->stackmap) {
+                stackmap_set_local_object(ctx->stackmap, result_slot, cp, LRT_DICT);
+            }
 
             /* Process generators - for dict, we need to handle key/value pair */
             codegen_dict_comprehension_loop(ctx, generators, key_expr, value_expr, result_slot);
 
             /* Load result */
             emit_aload(ctx, result_slot);
+            /* Fix the pushed type to be $D */
+            if (ctx->stackmap) {
+                stackmap_pop(ctx->stackmap, 1);
+                stackmap_push_object(ctx->stackmap, cp, LRT_DICT);
+            }
             break;
         }
 
@@ -2243,15 +2512,34 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
             if (generators->next) {
                 /* Nested generators - fall back to eager evaluation into a list,
                  * then wrap in an iterator. Not ideal but works. */
-                emit_new(ctx, LRT_LIST);
+                const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                uint16_t new_offset = ctx->code->len;
+                emit_new(ctx, LRT_LIST);  /* emit_new already pushes uninitialized to stackmap */
                 emit_u8(ctx, OP_DUP);
                 stack_push(ctx, 1);
+                if (ctx->stackmap) {
+                    stackmap_push_uninitialized(ctx->stackmap, new_offset);
+                }
                 emit_invokespecial(ctx, LRT_LIST, "<init>", "()V");
                 stack_pop(ctx, 1);
+                if (ctx->stackmap) {
+                    /* invokespecial <init> pops one uninitialized and converts the other to $L */
+                    stackmap_pop(ctx->stackmap, 1);
+                    stackmap_init_object(ctx->stackmap, new_offset, cp, LRT_LIST);
+                }
                 int result_slot = codegen_alloc_local(ctx, "$genexp_result");
                 emit_astore(ctx, result_slot);
+                /* Fix the local type to be $L, not $O */
+                if (ctx->stackmap) {
+                    stackmap_set_local_object(ctx->stackmap, result_slot, cp, LRT_LIST);
+                }
                 codegen_comprehension_loop(ctx, generators, elt, result_slot, COMP_LIST);
                 emit_aload(ctx, result_slot);
+                /* Fix the pushed type to be $L, not $O */
+                if (ctx->stackmap) {
+                    stackmap_pop(ctx->stackmap, 1);  /* Remove the $O that emit_aload pushed */
+                    stackmap_push_object(ctx->stackmap, cp, LRT_LIST);  /* Push correct $L type */
+                }
                 /* Get iterator from list */
                 indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache, PY_INDY_ITER, NULL, 0);
                 stackmap_track_indy(ctx, PY_INDY_ITER);
@@ -2299,6 +2587,12 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
                                   "(L$O;L$MH;)L$GE;");
                 stack_pop(ctx, 2);
                 stack_push(ctx, 1);
+                /* Update stackmap: pop source + mapper, push $GE */
+                if (ctx->stackmap) {
+                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                    stackmap_pop(ctx->stackmap, 2);
+                    stackmap_push_object(ctx->stackmap, cp, LRT_GENEXP);
+                }
             } else if (num_filters == 1) {
                 /* Single filter - create filter lambda */
                 ast_node_t *filter_lambda = ast_new(AST_LAMBDA, node->line, node->column);
@@ -2312,6 +2606,12 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
                                   "(L$O;L$MH;L$MH;)L$GE;");
                 stack_pop(ctx, 3);
                 stack_push(ctx, 1);
+                /* Update stackmap: pop source + mapper + filter, push $GE */
+                if (ctx->stackmap) {
+                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                    stackmap_pop(ctx->stackmap, 3);
+                    stackmap_push_object(ctx->stackmap, cp, LRT_GENEXP);
+                }
             } else {
                 /* Multiple filters - create array of filter lambdas */
                 emit_iconst(ctx, num_filters);
@@ -2321,6 +2621,10 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
                 for (slist_t *cond = ifs; cond; cond = cond->next) {
                     emit_u8(ctx, OP_DUP);
                     stack_push(ctx, 1);
+                    if (ctx->stackmap) {
+                        const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                        stackmap_push_object(ctx->stackmap, cp, "[L$MH;");
+                    }
                     emit_iconst(ctx, i);
 
                     ast_node_t *filter_lambda = ast_new(AST_LAMBDA, node->line, node->column);
@@ -2330,6 +2634,9 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
 
                     emit_u8(ctx, OP_AASTORE);
                     stack_pop(ctx, 3);
+                    if (ctx->stackmap) {
+                        stackmap_pop(ctx->stackmap, 3);
+                    }
                     i++;
                 }
                 /* Stack: [source, mapper, filters[]] */
@@ -2338,6 +2645,12 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
                                   "(L$O;L$MH;[L$MH;)L$GE;");
                 stack_pop(ctx, 3);
                 stack_push(ctx, 1);
+                /* Update stackmap: pop source + mapper + filters, push $GE */
+                if (ctx->stackmap) {
+                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                    stackmap_pop(ctx->stackmap, 3);
+                    stackmap_push_object(ctx->stackmap, cp, LRT_GENEXP);
+                }
             }
 
             /* Note: We're not freeing the synthetic AST nodes - they'll be
@@ -2718,6 +3031,7 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
 
             /* Save state for end_label - at this point stack has 1 item (the value) */
             stackmap_state_t *post_check_state = NULL;
+            int saved_stack_depth = ctx->stack_depth;  /* Save stack depth too */
             if (ctx->stackmap) {
                 post_check_state = stackmap_save_state(ctx->stackmap);
             }
@@ -2761,6 +3075,7 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
             codegen_emit_jump(ctx, OP_GOTO, start_label);
 
             /* Restore state for end_label - when IFNULL jumps here, stack has 1 item (null) */
+            ctx->stack_depth = saved_stack_depth;  /* Restore stack depth */
             if (ctx->stackmap && post_check_state) {
                 stackmap_restore_state(ctx->stackmap, post_check_state);
                 stackmap_state_free(post_check_state);
@@ -2896,6 +3211,11 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                 /* Generate body (only for last item to avoid nesting complexity) */
                 if (!item->next) {
                     codegen_stmts(ctx, body);
+                }
+
+                /* Ensure at least one instruction in try block (JVM requirement) */
+                if (ctx->code->len == try_start) {
+                    emit_u8(ctx, OP_NOP);
                 }
 
                 /* Record try end */
@@ -3045,24 +3365,48 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                 /* Create args array [None, None, None] */
                 emit_iconst(ctx, 3);
                 emit_anewarray(ctx, LRT_OBJECT);
+                /* args[0] = None */
                 emit_u8(ctx, OP_DUP);
                 stack_push(ctx, 1);
+                if (ctx->stackmap) {
+                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                    stackmap_push_object(ctx->stackmap, cp, "[L$O;");
+                }
                 emit_iconst(ctx, 0);
                 emit_py_none(ctx);
                 emit_u8(ctx, OP_AASTORE);
                 stack_pop(ctx, 3);
+                if (ctx->stackmap) {
+                    stackmap_pop(ctx->stackmap, 3);
+                }
+                /* args[1] = None */
                 emit_u8(ctx, OP_DUP);
                 stack_push(ctx, 1);
+                if (ctx->stackmap) {
+                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                    stackmap_push_object(ctx->stackmap, cp, "[L$O;");
+                }
                 emit_iconst(ctx, 1);
                 emit_py_none(ctx);
                 emit_u8(ctx, OP_AASTORE);
                 stack_pop(ctx, 3);
+                if (ctx->stackmap) {
+                    stackmap_pop(ctx->stackmap, 3);
+                }
+                /* args[2] = None */
                 emit_u8(ctx, OP_DUP);
                 stack_push(ctx, 1);
+                if (ctx->stackmap) {
+                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                    stackmap_push_object(ctx->stackmap, cp, "[L$O;");
+                }
                 emit_iconst(ctx, 2);
                 emit_py_none(ctx);
                 emit_u8(ctx, OP_AASTORE);
                 stack_pop(ctx, 3);
+                if (ctx->stackmap) {
+                    stackmap_pop(ctx->stackmap, 3);
+                }
 
                 indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache,
                                     PY_INDY_CALL, NULL, 0);
@@ -3072,6 +3416,9 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                 /* Discard __exit__ return value */
                 emit_u8(ctx, OP_POP);
                 stack_pop(ctx, 1);
+                if (ctx->stackmap) {
+                    stackmap_pop(ctx->stackmap, 1);
+                }
 
                 /* Add exception table entry */
                 const_pool_t *cp = class_writer_get_cp(ctx->cw);
@@ -3125,18 +3472,46 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
         case AST_IMPORT_FROM: {
             const char *module_name = node->data.import_from.module;
             slist_t *names = node->data.import_from.names;
+            int level = node->data.import_from.level;
 
-            if (!module_name) {
-                /* Relative import without module name - not supported yet */
-                fprintf(stderr, "Error: relative imports not fully supported\n");
-                break;
+            /* For relative imports (level > 0), we need to pass the level to importModule
+             * level 1 = from . import
+             * level 2 = from .. import
+             * etc.
+             */
+            
+            if (level > 0) {
+                /* Relative import: call $G.importModule(name, package, level) */
+                /* First, push the module name (may be null/empty for 'from . import') */
+                if (module_name && strlen(module_name) > 0) {
+                    emit_ldc_string(ctx, module_name);
+                } else {
+                    emit_aconst_null(ctx);
+                }
+                
+                /* Push current package name (null for now - would need __package__) */
+                emit_invokestatic(ctx, "$G", "getCurrentPackage",
+                                  "()Ljava/lang/String;");
+                stack_push(ctx, 1);
+                
+                /* Push level */
+                emit_iconst(ctx, level);
+                
+                /* Call importModule(name, package, level) */
+                emit_invokestatic(ctx, "$G", "importModule",
+                                  "(Ljava/lang/String;Ljava/lang/String;I)L" LRT_MODULE ";");
+                stack_pop(ctx, 2);  /* name, package, level -> module */
+            } else {
+                /* Absolute import */
+                if (!module_name || strlen(module_name) == 0) {
+                    fprintf(stderr, "Error: empty module name in import\n");
+                    break;
+                }
+                emit_ldc_string(ctx, module_name);
+                emit_invokestatic(ctx, "$G", "importModule",
+                                  "(Ljava/lang/String;)L" LRT_MODULE ";");
+                stack_push(ctx, 1);
             }
-
-            /* Import the module first */
-            emit_ldc_string(ctx, module_name);
-            emit_invokestatic(ctx, "$G", "importModule",
-                              "(Ljava/lang/String;)L" LRT_MODULE ";");
-            stack_push(ctx, 1);
 
             /* Now get each name from the module */
             for (slist_t *s = names; s; s = s->next) {
@@ -3146,11 +3521,18 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                 if (!as_name) as_name = name;
 
                 if (strcmp(name, "*") == 0) {
-                    /* from foo import * - get all public names */
-                    /* For now, just skip (complex implementation) */
-                    fprintf(stderr, "Warning: 'from %s import *' not fully implemented\n",
-                            module_name);
-                    continue;
+                    /* from foo import * - call $G.importStar(module) which handles it */
+                    /* Stack has: module */
+                    emit_invokestatic(ctx, "$G", "importStar",
+                                      "(L" LRT_MODULE ";)V");
+                    stack_pop(ctx, 1);
+                    if (ctx->stackmap) {
+                        stackmap_pop(ctx->stackmap, 1);
+                    }
+                    
+                    /* We consumed the module, so skip the final pop and return */
+                    /* No more names to process after * */
+                    goto import_from_done;
                 }
 
                 /* DUP module reference */
@@ -3174,6 +3556,10 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
             /* Pop the module reference */
             emit_u8(ctx, OP_POP);
             stack_pop(ctx, 1);
+            if (ctx->stackmap) {
+                stackmap_pop(ctx->stackmap, 1);
+            }
+        import_from_done:
             break;
         }
 
@@ -3243,17 +3629,27 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
             /* Generate try body */
             codegen_stmts(ctx, body);
 
+            /* Ensure at least one instruction in try block (JVM requirement) */
+            if (ctx->code->len == try_start_pc) {
+                emit_u8(ctx, OP_NOP);
+            }
+
             /* Record end of try block */
             uint16_t try_end_pc = (uint16_t)ctx->code->len;
 
-            /* Save state after try body for after_handlers */
+            /* Check if body can fall through (doesn't always throw/return/etc) */
+            bool body_falls_through = !stmts_always_transfer(body);
+
+            /* Save state after try body for after_handlers (only if body falls through) */
             stackmap_state_t *post_try_state = NULL;
-            if (ctx->stackmap) {
+            if (ctx->stackmap && body_falls_through) {
                 post_try_state = stackmap_save_state(ctx->stackmap);
             }
 
-            /* If no exception, jump past handlers */
-            codegen_emit_jump(ctx, OP_GOTO, after_handlers);
+            /* If no exception and body can fall through, jump past handlers */
+            if (body_falls_through) {
+                codegen_emit_jump(ctx, OP_GOTO, after_handlers);
+            }
 
             /* Generate exception handlers */
             for (slist_t *h = handlers; h; h = h->next) {
@@ -3279,11 +3675,49 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
 
                 if (exc_type) {
                     /* Typed handler: except SomeError as e: */
-                    /* TODO: Check if exception matches type */
-                    /* For now, catch all $X and check type at runtime */
+                    /* Check if exception matches the type at runtime */
+
+                    /* DUP exception for type check (keep original for re-raise) */
+                    emit_u8(ctx, OP_DUP);
+                    stack_push(ctx, 1);
+                    if (ctx->stackmap) {
+                        const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                        stackmap_push_object(ctx->stackmap, cp, "$X");
+                    }
+
+                    /* Evaluate exception type */
+                    codegen_expr(ctx, exc_type);
+
+                    /* Call exceptionMatches($X, $O) -> boolean */
+                    emit_invokestatic(ctx, "$BS", "exceptionMatches",
+                                      "(L$X;L$O;)Z");
+                    stack_pop(ctx, 1);  /* 2 args -> 1 boolean */
+                    if (ctx->stackmap) {
+                        stackmap_pop(ctx->stackmap, 2);
+                        /* Boolean result pushed but immediately popped by ifeq */
+                    }
+
+                    /* If no match (result == 0), re-raise the exception */
+                    label_t *match_label = codegen_new_label(ctx);
+                    codegen_emit_jump(ctx, OP_IFNE, match_label);  /* if true, jump to match */
+
+                    /* No match - re-raise (exception is still on stack from DUP) */
+                    emit_u8(ctx, OP_ATHROW);
+                    /* Note: stack has 1 $X, but after athrow no fallthrough */
+
+                    /* Match - pop the duplicate and continue */
+                    codegen_mark_label(ctx, match_label);
+                    /* Record frame: exception on stack after branch merge */
 
                     if (exc_name) {
-                        /* Bind exception to name */
+                        /* Bind exception to name - convert to Python object first */
+                        emit_invokevirtual(ctx, "$X", "asPyObject", "()L$O;");
+                        /* Stack: $X -> $O */
+                        if (ctx->stackmap) {
+                            const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                            stackmap_pop(ctx->stackmap, 1);
+                            stackmap_push_object(ctx->stackmap, cp, "$O");
+                        }
                         int exc_slot = codegen_get_local(ctx, exc_name);
                         if (exc_slot < 0) {
                             exc_slot = codegen_alloc_local(ctx, exc_name);
@@ -3317,8 +3751,10 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                 /* Generate handler body */
                 codegen_stmts(ctx, handler_body);
 
-                /* Jump to after all handlers */
-                codegen_emit_jump(ctx, OP_GOTO, after_handlers);
+                /* Jump to after all handlers (if handler can fall through) */
+                if (!stmts_always_transfer(handler_body)) {
+                    codegen_emit_jump(ctx, OP_GOTO, after_handlers);
+                }
 
                 /* Add exception table entry */
                 /* catch_type 0 = catch all, otherwise need class index */
@@ -3361,82 +3797,65 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
             ast_node_t *cause = node->data.raise_stmt.cause;
 
             if (exc) {
-                /* raise exc - evaluate and throw */
+                /* raise exc - evaluate the expression */
                 codegen_expr(ctx, exc);
 
-                /* If it's a class (type), instantiate it */
-                /* For now, assume it's already an exception instance or $X */
-
-                /* Check if it's a $X, if not wrap it */
-                emit_u8(ctx, OP_DUP);
-                stack_push(ctx, 1);
-                emit_instanceof(ctx, "$X");
-                label_t *is_exception = codegen_new_label(ctx);
-                codegen_emit_jump(ctx, OP_IFNE, is_exception);
-                stack_pop(ctx, 1);
-                if (ctx->stackmap) {
-                    stackmap_pop(ctx->stackmap, 1);
-                }
-
-                /* Not a $X - convert to string and wrap */
-                /* Stack: [obj] */
-                indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache,
-                                    PY_INDY_STR, NULL, 0);
-                stackmap_track_indy(ctx, PY_INDY_STR);
-
-                /* Create $X("Exception", str) */
-                emit_new(ctx, "$X");
-                emit_u8(ctx, OP_DUP_X1);
-                stack_push(ctx, 1);
-                emit_u8(ctx, OP_SWAP);
-                emit_ldc_string(ctx, "Exception");
-                emit_u8(ctx, OP_SWAP);
-                /* Stack: [$X, $X, "Exception", str] */
-                emit_invokespecial(ctx, "$X", "<init>",
-                                   "(Ljava/lang/String;Ljava/lang/String;)V");
-                stack_pop(ctx, 3);
-                /* Stack: [$X] */
-                label_t *do_throw = codegen_new_label(ctx);
-                codegen_emit_jump(ctx, OP_GOTO, do_throw);
-
-                codegen_mark_label(ctx, is_exception);
-                /* Already a $X, just use it */
-                /* Stack: [$X, int_result] - pop the instanceof result */
-                emit_u8(ctx, OP_POP);
-                stack_pop(ctx, 1);
-                if (ctx->stackmap) {
-                    stackmap_pop(ctx->stackmap, 1);
-                }
-
-                codegen_mark_label(ctx, do_throw);
-
-                /* Handle 'from cause' if present */
                 if (cause) {
-                    /* TODO: Set __cause__ on the exception */
-                    /* For now, just evaluate and discard */
+                    /* raise exc from cause - evaluate cause and call raiseExceptionFrom */
                     codegen_expr(ctx, cause);
-                    emit_u8(ctx, OP_POP);
-                    stack_pop(ctx, 1);
+                    emit_invokestatic(ctx, "$BS", "raiseExceptionFrom",
+                                      "(L$O;L$O;)L$X;");
+                    stack_pop(ctx, 1);  /* Two args -> one result */
+                    if (ctx->stackmap) {
+                        const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                        stackmap_pop(ctx->stackmap, 2);
+                        stackmap_push_object(ctx->stackmap, cp, "$X");
+                    }
+                } else {
+                    /* raise exc - call raiseException helper */
+                    emit_invokestatic(ctx, "$BS", "raiseException",
+                                      "(L$O;)L$X;");
+                    /* Stack: $O -> $X */
+                    if (ctx->stackmap) {
+                        const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                        stackmap_pop(ctx->stackmap, 1);
+                        stackmap_push_object(ctx->stackmap, cp, "$X");
+                    }
                 }
 
-                /* Throw */
-                emit_checkcast(ctx, "$X");
+                /* Throw the returned exception */
                 emit_u8(ctx, OP_ATHROW);
                 stack_pop(ctx, 1);
+                if (ctx->stackmap) {
+                    stackmap_pop(ctx->stackmap, 1);
+                }
             } else {
                 /* Bare raise - re-raise current exception */
                 /* This requires exception context which we don't track yet */
                 /* For now, raise a generic error */
+                uint16_t new_offset = ctx->code->len;
                 emit_new(ctx, "$X");
                 emit_u8(ctx, OP_DUP);
-                stack_push(ctx, 1);
+                stack_push(ctx, 2);
+                if (ctx->stackmap) {
+                    stackmap_push_uninitialized(ctx->stackmap, new_offset);
+                    stackmap_push_uninitialized(ctx->stackmap, new_offset);
+                }
                 emit_ldc_string(ctx, "RuntimeError");
                 emit_ldc_string(ctx, "No active exception to re-raise");
                 emit_invokespecial(ctx, "$X", "<init>",
                                    "(Ljava/lang/String;Ljava/lang/String;)V");
-                stack_pop(ctx, 2);
+                stack_pop(ctx, 3);
+                if (ctx->stackmap) {
+                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                    stackmap_pop(ctx->stackmap, 4);  /* 2 uninit + 2 strings */
+                    stackmap_init_object(ctx->stackmap, new_offset, cp, "$X");
+                }
                 emit_u8(ctx, OP_ATHROW);
                 stack_pop(ctx, 1);
+                if (ctx->stackmap) {
+                    stackmap_pop(ctx->stackmap, 1);
+                }
             }
             break;
         }
@@ -3479,6 +3898,10 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                 indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache,
                                     PY_INDY_STR, NULL, 0);
                 stackmap_track_indy(ctx, PY_INDY_STR);
+                /* Cast to $S and extract java.lang.String from $S.value */
+                emit_checkcast(ctx, "$S");
+                emit_getfield(ctx, "$S", "value", "Ljava/lang/String;");
+                /* Stack: $O -> String (no change in stack depth) */
             } else {
                 emit_ldc_string(ctx, "assertion failed");
             }
@@ -3606,7 +4029,10 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                     emit_u8(ctx, OP_SWAP);  /* setAttr expects (name, value) */
                     emit_invokevirtual(ctx, LRT_CLASS, "setAttr",
                                        "(Ljava/lang/String;L$O;)V");
-                    stack_pop(ctx, 2);
+                    stack_pop(ctx, 3);  /* class + name + value consumed */
+                    if (ctx->stackmap) {
+                        stackmap_pop(ctx->stackmap, 3);
+                    }
                 } else if (stmt->type == AST_ASSIGN) {
                     /* Class variable assignment */
                     for (slist_t *t = stmt->data.assign.targets; t; t = t->next) {
@@ -3619,7 +4045,10 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                             codegen_expr(ctx, stmt->data.assign.value);
                             emit_invokevirtual(ctx, LRT_CLASS, "setAttr",
                                                "(Ljava/lang/String;L$O;)V");
-                            stack_pop(ctx, 2);
+                            stack_pop(ctx, 3);  /* class + name + value consumed */
+                            if (ctx->stackmap) {
+                                stackmap_pop(ctx->stackmap, 3);
+                            }
                         }
                     }
                 } else if (stmt->type == AST_PASS) {
@@ -3643,6 +4072,9 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                 emit_invokestatic(ctx, "$G", "setGlobal",
                                   "(Ljava/lang/String;L$O;)V");
                 stack_pop(ctx, 2);
+                if (ctx->stackmap) {
+                    stackmap_pop(ctx->stackmap, 2);
+                }
             } else {
                 int final_slot = codegen_get_local(ctx, class_name);
                 if (final_slot < 0) {
@@ -4074,17 +4506,26 @@ static void codegen_function_def(codegen_ctx_t *ctx, ast_node_t *node)
         if (func_ctx->next_local > func_ctx->max_locals) {
             func_ctx->max_locals = func_ctx->next_local;
         }
+
+        /* Create the list: new $L() */
+        uint16_t new_offset = func_ctx->code->len;
+        emit_new(func_ctx, LRT_LIST);  /* emit_new pushes uninitialized to stackmap */
+        emit_u8(func_ctx, OP_DUP);
+        stack_push(func_ctx, 1);
+        if (func_ctx->stackmap) {
+            stackmap_push_uninitialized(func_ctx->stackmap, new_offset);
+        }
+        emit_invokespecial(func_ctx, LRT_LIST, "<init>", "()V");
+        stack_pop(func_ctx, 1);
+        if (func_ctx->stackmap) {
+            stackmap_pop(func_ctx->stackmap, 1);
+            stackmap_init_object(func_ctx->stackmap, new_offset, cp, LRT_LIST);
+        }
+        emit_astore(func_ctx, func_ctx->yield_list_slot);
+        /* Fix the local type to be $L, not $O */
         if (func_ctx->stackmap) {
             stackmap_set_local_object(func_ctx->stackmap, func_ctx->yield_list_slot, cp, LRT_LIST);
         }
-
-        /* Create the list: new $L() */
-        emit_new(func_ctx, LRT_LIST);
-        emit_u8(func_ctx, OP_DUP);
-        stack_push(func_ctx, 2);
-        emit_invokespecial(func_ctx, LRT_LIST, "<init>", "()V");
-        stack_pop(func_ctx, 1);
-        emit_astore(func_ctx, func_ctx->yield_list_slot);
     }
 
     /* Generate code for function body */
@@ -4182,6 +4623,10 @@ static void codegen_function_def(codegen_ctx_t *ctx, ast_node_t *node)
 
             emit_u8(ctx, OP_DUP);
             stack_push(ctx, 1);
+            if (ctx->stackmap) {
+                const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                stackmap_push_object(ctx->stackmap, cp, "[L$O;");
+            }
             emit_iconst(ctx, i);
 
             /* Load the captured variable from current (parent) context */
@@ -4195,6 +4640,9 @@ static void codegen_function_def(codegen_ctx_t *ctx, ast_node_t *node)
 
             emit_u8(ctx, OP_AASTORE);
             stack_pop(ctx, 3);
+            if (ctx->stackmap) {
+                stackmap_pop(ctx->stackmap, 3);
+            }
             i++;
         }
 
@@ -4203,13 +4651,23 @@ static void codegen_function_def(codegen_ctx_t *ctx, ast_node_t *node)
                           "(Ljava/lang/invoke/MethodHandle;[L$O;)L$MH;");
         stack_pop(ctx, 2);
         stack_push(ctx, 1);
+        if (ctx->stackmap) {
+            const_pool_t *cp = class_writer_get_cp(ctx->cw);
+            stackmap_pop(ctx->stackmap, 2);
+            stackmap_push_object(ctx->stackmap, cp, "$MH");
+        }
 
         slist_free(captured_vars);
     } else {
         /* No closure - wrap in $MH directly */
         emit_invokestatic(ctx, "$MH", "of",
                           "(Ljava/lang/invoke/MethodHandle;)L$MH;");
-        /* Stack: MH -> $MH (no change in count) */
+        /* Stack: MH -> $MH (no change in count, but type changes) */
+        if (ctx->stackmap) {
+            const_pool_t *cp = class_writer_get_cp(ctx->cw);
+            stackmap_pop(ctx->stackmap, 1);
+            stackmap_push_object(ctx->stackmap, cp, "$MH");
+        }
     }
 
     /* Apply decorators (in reverse order - innermost first) */
@@ -4225,20 +4683,34 @@ static void codegen_function_def(codegen_ctx_t *ctx, ast_node_t *node)
                 deco_array[i++] = d->data;
             }
             
-            /* Apply in reverse order (innermost decorator first) */
+            /* Apply in reverse order (innermost decorator first)
+             * Net effect of each decorator application: 
+             *   input: one $MH or $O on stack
+             *   output: one $O on stack (decorated result)
+             * We don't track intermediate operations - just track the net effect */
             for (i = num_decorators - 1; i >= 0; i--) {
                 ast_node_t *deco = deco_array[i];
                 
-                /* Stack has the function, need to call decorator(function) */
-                /* Evaluate the decorator expression */
+                /* Pop the function type from stackmap (will be replaced by result) */
+                if (ctx->stackmap) {
+                    stackmap_pop(ctx->stackmap, 1);
+                }
+                
+                /* Evaluate the decorator expression - this pushes decorator to stackmap */
                 codegen_expr(ctx, deco);
+                
+                /* Now pop decorator from stackmap (we'll manually track the result) */
+                if (ctx->stackmap) {
+                    stackmap_pop(ctx->stackmap, 1);
+                }
+                
                 /* Stack: func, decorator */
                 emit_u8(ctx, OP_SWAP);
                 /* Stack: decorator, func */
                 
                 /* Create single-element array for the function argument */
                 emit_iconst(ctx, 1);
-                emit_anewarray(ctx, LRT_OBJECT);
+                emit_anewarray_no_track(ctx, LRT_OBJECT);
                 /* Stack: decorator, func, array */
                 emit_u8(ctx, OP_DUP_X1);
                 /* Stack: decorator, array, func, array */
@@ -4254,9 +4726,15 @@ static void codegen_function_def(codegen_ctx_t *ctx, ast_node_t *node)
                 /* Call decorator(func) using invokedynamic */
                 indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache,
                                     PY_INDY_CALL, NULL, 1);
-                stackmap_track_indy(ctx, PY_INDY_CALL);
+                /* Don't use stackmap_track_indy here - we're manually managing */
                 stack_pop(ctx, 2);  /* decorator + array consumed */
                 stack_push(ctx, 1); /* result pushed */
+                
+                /* Push the result type to stackmap - it's a $O now */
+                if (ctx->stackmap) {
+                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                    stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
+                }
             }
             
             free(deco_array);
@@ -4272,6 +4750,9 @@ static void codegen_function_def(codegen_ctx_t *ctx, ast_node_t *node)
         emit_invokestatic(ctx, "$G", "setGlobal",
                           "(Ljava/lang/String;L$O;)V");
         stack_pop(ctx, 2);
+        if (ctx->stackmap) {
+            stackmap_pop(ctx->stackmap, 2);  /* Pop String + $MH from stackmap */
+        }
     } else {
         int func_slot = codegen_get_local(ctx, func_name);
         if (func_slot < 0) {
@@ -4492,12 +4973,22 @@ static void codegen_lambda(codegen_ctx_t *ctx, ast_node_t *node)
                           "(Ljava/lang/invoke/MethodHandle;[L$O;)L$MH;");
         stack_pop(ctx, 2);
         stack_push(ctx, 1);
+        /* Update stackmap: pop MH + array, push $MH */
+        if (ctx->stackmap) {
+            stackmap_pop(ctx->stackmap, 2);
+            stackmap_push_object(ctx->stackmap, cp, "$MH");
+        }
 
         slist_free(captured_vars);
     } else {
         /* No closure - wrap in $MH */
         emit_invokestatic(ctx, "$MH", "of",
                           "(Ljava/lang/invoke/MethodHandle;)L$MH;");
+        /* Update stackmap: pop MH, push $MH */
+        if (ctx->stackmap) {
+            stackmap_pop(ctx->stackmap, 1);
+            stackmap_push_object(ctx->stackmap, cp, "$MH");
+        }
     }
 
     /* Lambda leaves $MH on the stack (it's an expression) */

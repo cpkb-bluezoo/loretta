@@ -298,4 +298,168 @@ public final class $BS {
         }
         return new ConstantCallSite(mh.asType(type));
     }
+    
+    /**
+     * Check if an exception matches a type (for except clause type checking).
+     * 
+     * @param exc The exception that was caught
+     * @param excType The exception type to check against (a $Cls or tuple of $Cls)
+     * @return true if the exception matches the type
+     */
+    public static boolean exceptionMatches($X exc, $O excType) {
+        if (excType instanceof $Cls) {
+            $Cls cls = ($Cls) excType;
+            
+            // First try Java instanceof check if we have proper subclass
+            if (cls.javaClass != null && cls.javaClass.isInstance(exc)) {
+                return true;
+            }
+            
+            // Fallback: check by type name with hierarchy awareness
+            return typeMatchesByName(exc.type, cls.name);
+        }
+        
+        if (excType instanceof $T) {
+            // Tuple of exception types
+            for ($O item : (($T) excType).items) {
+                if (exceptionMatches(exc, item)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        
+        // Unknown type, don't match
+        return false;
+    }
+    
+    /**
+     * Check if an exception type name matches a target type name, considering hierarchy.
+     */
+    private static boolean typeMatchesByName(String excType, String targetType) {
+        if (excType.equals(targetType)) return true;
+        
+        // Check hierarchy - these are the known parent relationships
+        // This handles old-style exceptions created via $X(typeName, message)
+        switch (excType) {
+            case "ZeroDivisionError":
+            case "OverflowError":
+            case "FloatingPointError":
+                if (targetType.equals("ArithmeticError") || targetType.equals("Exception") || targetType.equals("BaseException")) return true;
+                break;
+            case "ArithmeticError":
+                if (targetType.equals("Exception") || targetType.equals("BaseException")) return true;
+                break;
+            case "IndexError":
+            case "KeyError":
+                if (targetType.equals("LookupError") || targetType.equals("Exception") || targetType.equals("BaseException")) return true;
+                break;
+            case "LookupError":
+                if (targetType.equals("Exception") || targetType.equals("BaseException")) return true;
+                break;
+            case "ModuleNotFoundError":
+                if (targetType.equals("ImportError") || targetType.equals("Exception") || targetType.equals("BaseException")) return true;
+                break;
+            case "UnboundLocalError":
+                if (targetType.equals("NameError") || targetType.equals("Exception") || targetType.equals("BaseException")) return true;
+                break;
+            case "FileNotFoundError":
+            case "FileExistsError":
+            case "PermissionError":
+            case "IsADirectoryError":
+            case "NotADirectoryError":
+                if (targetType.equals("OSError") || targetType.equals("IOError") || targetType.equals("Exception") || targetType.equals("BaseException")) return true;
+                break;
+            case "NotImplementedError":
+            case "RecursionError":
+                if (targetType.equals("RuntimeError") || targetType.equals("Exception") || targetType.equals("BaseException")) return true;
+                break;
+            case "UnicodeError":
+                if (targetType.equals("ValueError") || targetType.equals("Exception") || targetType.equals("BaseException")) return true;
+                break;
+            case "TypeError":
+            case "ValueError":
+            case "AttributeError":
+            case "NameError":
+            case "ImportError":
+            case "RuntimeError":
+            case "OSError":
+            case "IOError":
+            case "AssertionError":
+            case "EOFError":
+            case "SyntaxError":
+            case "StopIteration":
+            case "StopAsyncIteration":
+                if (targetType.equals("Exception") || targetType.equals("BaseException")) return true;
+                break;
+            case "SystemExit":
+            case "KeyboardInterrupt":
+            case "GeneratorExit":
+                if (targetType.equals("BaseException")) return true;
+                break;
+            case "Exception":
+                if (targetType.equals("BaseException")) return true;
+                break;
+        }
+        return false;
+    }
+    
+    /**
+     * Raise a Python exception.
+     * Handles both $XO wrappers (from exception class calls) and raw values.
+     * Returns the exception to throw (caller uses athrow).
+     * 
+     * @param value The value to raise - can be $XO, $Cls (exception class), or any value
+     * @return The exception to throw
+     */
+    public static $X raiseException($O value) {
+        if (value instanceof $XO) {
+            // Unwrap and return the Java exception
+            return (($XO) value).exception;
+        }
+        
+        if (value instanceof $Cls) {
+            // Bare exception class: raise TypeError -> TypeError()
+            $Cls cls = ($Cls) value;
+            if (cls.javaClass != null && $X.class.isAssignableFrom(cls.javaClass)) {
+                return $X.create(cls.name, "");
+            }
+        }
+        
+        // Default: convert to string and wrap in generic Exception
+        String message = value.__str__().value;
+        return new $X.Exception(message);
+    }
+    
+    /**
+     * Raise a Python exception with cause (for raise X from Y).
+     * Returns the exception to throw (caller uses athrow).
+     * 
+     * @param value The exception to raise
+     * @param cause The cause exception
+     * @return The exception to throw
+     */
+    public static $X raiseExceptionFrom($O value, $O cause) {
+        $X exc;
+        
+        if (value instanceof $XO) {
+            exc = (($XO) value).exception;
+        } else if (value instanceof $Cls) {
+            $Cls cls = ($Cls) value;
+            if (cls.javaClass != null && $X.class.isAssignableFrom(cls.javaClass)) {
+                exc = $X.create(cls.name, "");
+            } else {
+                exc = new $X.Exception(value.__str__().value);
+            }
+        } else {
+            exc = new $X.Exception(value.__str__().value);
+        }
+        
+        // Set the cause if it's an exception
+        if (cause instanceof $XO) {
+            exc.initCause((($XO) cause).exception);
+        }
+        
+        return exc;
+    }
 }

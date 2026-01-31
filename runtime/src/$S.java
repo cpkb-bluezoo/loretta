@@ -344,7 +344,7 @@ class $SI extends $O {
     @Override
     public $O __next__() {
         if (index >= str.value.length()) {
-            throw new $X("StopIteration", "");
+            throw new $X.StopIteration();
         }
         return $S.of(String.valueOf(str.value.charAt(index++)));
     }

@@ -99,7 +99,7 @@ public final class $GE extends $O {
     @Override
     public $O __next__() {
         if (exhausted || nextValue == null) {
-            throw new $X("StopIteration", "");
+            throw new $X.StopIteration();
         }
         
         $O result = nextValue;

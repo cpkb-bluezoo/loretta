@@ -69,12 +69,12 @@ public class $Gen extends $O {
     @Override
     public $O __next__() {
         if (state == STATE_DONE) {
-            throw new $X("StopIteration", "");
+            throw new $X.StopIteration();
         }
         
         $O value = step();
         if (value == null && state == STATE_DONE) {
-            throw new $X("StopIteration", "");
+            throw new $X.StopIteration();
         }
         
         lastValue = value;

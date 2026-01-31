@@ -14,6 +14,9 @@ public final class $Cls extends $O {
     public final $Cls[] bases;
     public final $D attrs;  // Methods and class attributes
     
+    /** For built-in types: the corresponding Java class */
+    public Class<?> javaClass;
+    
     /**
      * Create a new class.
      */
@@ -21,6 +24,7 @@ public final class $Cls extends $O {
         this.name = name;
         this.bases = bases != null ? bases : new $Cls[0];
         this.attrs = new $D();
+        this.javaClass = null;
     }
     
     /**
@@ -96,6 +100,11 @@ public final class $Cls extends $O {
     
     @Override
     public $O __call__($O... args) {
+        // Special handling for exception classes
+        if (javaClass != null && $X.class.isAssignableFrom(javaClass)) {
+            return createException(args);
+        }
+        
         // Create new instance
         $Inst inst = new $Inst(this);
         
@@ -110,6 +119,20 @@ public final class $Cls extends $O {
         }
         
         return inst;
+    }
+    
+    /**
+     * Create an exception instance from this exception class.
+     */
+    private $O createException($O[] args) {
+        String message = "";
+        if (args.length > 0 && args[0] != null) {
+            message = args[0].__str__().value;
+        }
+        
+        // Use $X.create to get the right exception type
+        $X exc = $X.create(name, message);
+        return exc.asPyObject();
     }
     
     @Override

@@ -201,7 +201,7 @@ class $TI extends $O {
     @Override
     public $O __next__() {
         if (index >= tuple.items.length) {
-            throw new $X("StopIteration", "");
+            throw new $X.StopIteration();
         }
         return tuple.items[index++];
     }

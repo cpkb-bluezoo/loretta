@@ -41,7 +41,7 @@ public class $File extends $O {
         if (reader == null) throw new $X("UnsupportedOperation", "not readable");
         try {
             String line = reader.readLine();
-            if (line == null) throw new $X("StopIteration", "");
+            if (line == null) throw new $X.StopIteration();
             return $S.of(line + "\n");
         } catch (IOException e) {
             throw new $X("IOError", e.getMessage());

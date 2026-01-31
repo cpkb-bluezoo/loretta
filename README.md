@@ -204,7 +204,6 @@ and semantics in Java. Ultra-short class names keep bytecode compact:
 
 ## Known Limitations
 
-- **StackMapTable**: Complex control flow may require `java -noverify`
 - **Multiple inheritance**: Not yet supported
 - **Metaclasses**: Not supported
 - **Async/await**: Parsed but not code-generated

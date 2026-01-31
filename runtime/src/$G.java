@@ -1,6 +1,13 @@
 import java.util.Scanner;
 import java.util.HashMap;
 import java.util.Map;
+import java.io.File;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * $G - Global/builtin function lookup.
@@ -16,6 +23,464 @@ public final class $G {
     
     /** Loaded modules registry */
     private static final Map<String, $Mod> modules = new HashMap<>();
+    
+    /** Current package being imported (for relative imports) */
+    private static String currentPackage = "";
+    
+    /** CPython stdlib path (auto-detected or from env var) */
+    private static String cpythonStdlibPath = null;
+    
+    /** Loretta compiler path */
+    private static String lorettaCompilerPath = null;
+    
+    /** Cache directory for compiled stdlib modules */
+    private static File stdlibCacheDir = null;
+    
+    static {
+        // Register built-in modules
+        registerBuiltinModules();
+    }
+    
+    /**
+     * Register built-in modules like sys, builtins.
+     */
+    private static void registerBuiltinModules() {
+        // Create sys module
+        $Mod sysModule = new $Mod("sys");
+        sysModule.setAttr("path", $Sys.path);
+        sysModule.setAttr("modules", $Sys.modules);
+        sysModule.setAttr("argv", $Sys.argv);
+        sysModule.setAttr("version", $Sys.version);
+        sysModule.setAttr("version_info", $Sys.version_info);
+        sysModule.setAttr("platform", $Sys.platform);
+        sysModule.setAttr("stdin", $Sys.stdin);
+        sysModule.setAttr("stdout", $Sys.stdout);
+        sysModule.setAttr("stderr", $Sys.stderr);
+        sysModule.setAttr("maxsize", $Sys.maxsize);
+        sysModule.setAttr("meta_path", $Sys.meta_path);
+        sysModule.setAttr("path_hooks", $Sys.path_hooks);
+        sysModule.setAttr("path_importer_cache", $Sys.path_importer_cache);
+        sysModule.setAttr("executable", $Sys.executable);
+        sysModule.setAttr("prefix", $Sys.prefix);
+        modules.put("sys", sysModule);
+        
+        // Create builtins module (references to built-in functions)
+        $Mod builtinsModule = new $Mod("builtins");
+        builtinsModule.setAttr("print", PRINT);
+        builtinsModule.setAttr("len", LEN);
+        builtinsModule.setAttr("range", RANGE);
+        builtinsModule.setAttr("int", INT);
+        builtinsModule.setAttr("float", FLOAT);
+        builtinsModule.setAttr("str", STR);
+        builtinsModule.setAttr("bool", BOOL);
+        builtinsModule.setAttr("list", LIST);
+        builtinsModule.setAttr("dict", DICT);
+        builtinsModule.setAttr("tuple", TUPLE);
+        builtinsModule.setAttr("set", SET);
+        builtinsModule.setAttr("type", TYPE);
+        builtinsModule.setAttr("isinstance", ISINSTANCE);
+        builtinsModule.setAttr("hasattr", HASATTR);
+        builtinsModule.setAttr("getattr", GETATTR);
+        builtinsModule.setAttr("setattr", SETATTR);
+        builtinsModule.setAttr("None", $N.INSTANCE);
+        builtinsModule.setAttr("True", $B.TRUE);
+        builtinsModule.setAttr("False", $B.FALSE);
+        
+        // Exception classes
+        builtinsModule.setAttr("BaseException", ExceptionClasses.BaseException);
+        builtinsModule.setAttr("Exception", ExceptionClasses.Exception);
+        builtinsModule.setAttr("SystemExit", ExceptionClasses.SystemExit);
+        builtinsModule.setAttr("KeyboardInterrupt", ExceptionClasses.KeyboardInterrupt);
+        builtinsModule.setAttr("GeneratorExit", ExceptionClasses.GeneratorExit);
+        builtinsModule.setAttr("StopIteration", ExceptionClasses.StopIteration);
+        builtinsModule.setAttr("StopAsyncIteration", ExceptionClasses.StopAsyncIteration);
+        builtinsModule.setAttr("ArithmeticError", ExceptionClasses.ArithmeticError);
+        builtinsModule.setAttr("ZeroDivisionError", ExceptionClasses.ZeroDivisionError);
+        builtinsModule.setAttr("OverflowError", ExceptionClasses.OverflowError);
+        builtinsModule.setAttr("AssertionError", ExceptionClasses.AssertionError);
+        builtinsModule.setAttr("AttributeError", ExceptionClasses.AttributeError);
+        builtinsModule.setAttr("EOFError", ExceptionClasses.EOFError);
+        builtinsModule.setAttr("TypeError", ExceptionClasses.TypeError);
+        builtinsModule.setAttr("ValueError", ExceptionClasses.ValueError);
+        builtinsModule.setAttr("UnicodeError", ExceptionClasses.UnicodeError);
+        builtinsModule.setAttr("ImportError", ExceptionClasses.ImportError);
+        builtinsModule.setAttr("ModuleNotFoundError", ExceptionClasses.ModuleNotFoundError);
+        builtinsModule.setAttr("LookupError", ExceptionClasses.LookupError);
+        builtinsModule.setAttr("IndexError", ExceptionClasses.IndexError);
+        builtinsModule.setAttr("KeyError", ExceptionClasses.KeyError);
+        builtinsModule.setAttr("NameError", ExceptionClasses.NameError);
+        builtinsModule.setAttr("UnboundLocalError", ExceptionClasses.UnboundLocalError);
+        builtinsModule.setAttr("OSError", ExceptionClasses.OSError);
+        builtinsModule.setAttr("IOError", ExceptionClasses.OSError);  // Alias
+        builtinsModule.setAttr("FileExistsError", ExceptionClasses.FileExistsError);
+        builtinsModule.setAttr("FileNotFoundError", ExceptionClasses.FileNotFoundError);
+        builtinsModule.setAttr("IsADirectoryError", ExceptionClasses.IsADirectoryError);
+        builtinsModule.setAttr("NotADirectoryError", ExceptionClasses.NotADirectoryError);
+        builtinsModule.setAttr("PermissionError", ExceptionClasses.PermissionError);
+        builtinsModule.setAttr("RuntimeError", ExceptionClasses.RuntimeError);
+        builtinsModule.setAttr("NotImplementedError", ExceptionClasses.NotImplementedError);
+        builtinsModule.setAttr("RecursionError", ExceptionClasses.RecursionError);
+        builtinsModule.setAttr("SyntaxError", ExceptionClasses.SyntaxError);
+        builtinsModule.setAttr("Warning", ExceptionClasses.Warning);
+        builtinsModule.setAttr("DeprecationWarning", ExceptionClasses.DeprecationWarning);
+        builtinsModule.setAttr("UserWarning", ExceptionClasses.UserWarning);
+        
+        modules.put("builtins", builtinsModule);
+        
+        // Register C-extension replacement modules
+        registerCExtModules();
+    }
+    
+    /**
+     * Register C-extension replacement modules.
+     * These are Java implementations of modules that are normally C extensions in CPython.
+     */
+    private static void registerCExtModules() {
+        // _posix / posix / nt - OS operations
+        $Mod posixMod = new $Mod("posix");
+        posixMod.setAttr("name", _posix.name);
+        posixMod.setAttr("sep", _posix.sep);
+        posixMod.setAttr("altsep", _posix.altsep != null ? _posix.altsep : $N.INSTANCE);
+        posixMod.setAttr("pathsep", _posix.pathsep);
+        posixMod.setAttr("linesep", _posix.linesep);
+        posixMod.setAttr("curdir", _posix.curdir);
+        posixMod.setAttr("pardir", _posix.pardir);
+        posixMod.setAttr("extsep", _posix.extsep);
+        posixMod.setAttr("devnull", _posix.devnull);
+        posixMod.setAttr("environ", _posix.environ);
+        posixMod.setAttr("F_OK", $I.of(_posix.F_OK));
+        posixMod.setAttr("R_OK", $I.of(_posix.R_OK));
+        posixMod.setAttr("W_OK", $I.of(_posix.W_OK));
+        posixMod.setAttr("X_OK", $I.of(_posix.X_OK));
+        
+        // Register functions as method handles
+        posixMod.setAttr("getcwd", new $O() {
+            @Override public $O __call__($O... args) { return _posix.getcwd(); }
+            @Override public $S __repr__() { return $S.of("<built-in function getcwd>"); }
+        });
+        posixMod.setAttr("chdir", new $O() {
+            @Override public $O __call__($O... args) { _posix.chdir(args[0]); return $N.INSTANCE; }
+            @Override public $S __repr__() { return $S.of("<built-in function chdir>"); }
+        });
+        posixMod.setAttr("listdir", new $O() {
+            @Override public $O __call__($O... args) { 
+                return args.length > 0 ? _posix.listdir(args[0]) : _posix.listdir(); 
+            }
+            @Override public $S __repr__() { return $S.of("<built-in function listdir>"); }
+        });
+        posixMod.setAttr("mkdir", new $O() {
+            @Override public $O __call__($O... args) { 
+                if (args.length > 1) _posix.mkdir(args[0], args[1]);
+                else _posix.mkdir(args[0]); 
+                return $N.INSTANCE; 
+            }
+            @Override public $S __repr__() { return $S.of("<built-in function mkdir>"); }
+        });
+        posixMod.setAttr("makedirs", new $O() {
+            @Override public $O __call__($O... args) { 
+                if (args.length > 2) _posix.makedirs(args[0], args[1], args[2]);
+                else if (args.length > 1) _posix.makedirs(args[0], args[1]);
+                else _posix.makedirs(args[0]); 
+                return $N.INSTANCE; 
+            }
+            @Override public $S __repr__() { return $S.of("<built-in function makedirs>"); }
+        });
+        posixMod.setAttr("remove", new $O() {
+            @Override public $O __call__($O... args) { _posix.remove(args[0]); return $N.INSTANCE; }
+            @Override public $S __repr__() { return $S.of("<built-in function remove>"); }
+        });
+        posixMod.setAttr("unlink", new $O() {
+            @Override public $O __call__($O... args) { _posix.unlink(args[0]); return $N.INSTANCE; }
+            @Override public $S __repr__() { return $S.of("<built-in function unlink>"); }
+        });
+        posixMod.setAttr("rmdir", new $O() {
+            @Override public $O __call__($O... args) { _posix.rmdir(args[0]); return $N.INSTANCE; }
+            @Override public $S __repr__() { return $S.of("<built-in function rmdir>"); }
+        });
+        posixMod.setAttr("rename", new $O() {
+            @Override public $O __call__($O... args) { _posix.rename(args[0], args[1]); return $N.INSTANCE; }
+            @Override public $S __repr__() { return $S.of("<built-in function rename>"); }
+        });
+        posixMod.setAttr("replace", new $O() {
+            @Override public $O __call__($O... args) { _posix.replace(args[0], args[1]); return $N.INSTANCE; }
+            @Override public $S __repr__() { return $S.of("<built-in function replace>"); }
+        });
+        posixMod.setAttr("stat", new $O() {
+            @Override public $O __call__($O... args) { return _posix.stat(args[0]); }
+            @Override public $S __repr__() { return $S.of("<built-in function stat>"); }
+        });
+        posixMod.setAttr("lstat", new $O() {
+            @Override public $O __call__($O... args) { return _posix.lstat(args[0]); }
+            @Override public $S __repr__() { return $S.of("<built-in function lstat>"); }
+        });
+        posixMod.setAttr("access", new $O() {
+            @Override public $O __call__($O... args) { return _posix.access(args[0], args[1]); }
+            @Override public $S __repr__() { return $S.of("<built-in function access>"); }
+        });
+        posixMod.setAttr("getenv", new $O() {
+            @Override public $O __call__($O... args) { 
+                return args.length > 1 ? _posix.getenv(args[0], args[1]) : _posix.getenv(args[0]); 
+            }
+            @Override public $S __repr__() { return $S.of("<built-in function getenv>"); }
+        });
+        posixMod.setAttr("walk", new $O() {
+            @Override public $O __call__($O... args) { 
+                if (args.length > 3) return _posix.walk(args[0], args[1], args[2], args[3]);
+                return _posix.walk(args[0]); 
+            }
+            @Override public $S __repr__() { return $S.of("<built-in function walk>"); }
+        });
+        
+        modules.put("posix", posixMod);
+        modules.put("_posix", posixMod);
+        // On Windows this would be "nt", but we use posix for simplicity
+        modules.put("nt", posixMod);
+        
+        // _collections - deque, defaultdict, Counter
+        $Mod collectionsMod = new $Mod("_collections");
+        collectionsMod.setAttr("deque", new $O() {
+            @Override public $O __call__($O... args) { return _collections.deque_new(args); }
+            @Override public $S __repr__() { return $S.of("<class 'collections.deque'>"); }
+        });
+        collectionsMod.setAttr("defaultdict", new $O() {
+            @Override public $O __call__($O... args) { return _collections.defaultdict_new(args); }
+            @Override public $S __repr__() { return $S.of("<class 'collections.defaultdict'>"); }
+        });
+        collectionsMod.setAttr("Counter", new $O() {
+            @Override public $O __call__($O... args) { return _collections.Counter_new(args); }
+            @Override public $S __repr__() { return $S.of("<class 'collections.Counter'>"); }
+        });
+        modules.put("_collections", collectionsMod);
+        
+        // _sre - regex engine
+        $Mod sreMod = new $Mod("_sre");
+        // Flag constants
+        sreMod.setAttr("IGNORECASE", $I.of(_sre.IGNORECASE));
+        sreMod.setAttr("I", $I.of(_sre.I));
+        sreMod.setAttr("LOCALE", $I.of(_sre.LOCALE));
+        sreMod.setAttr("L", $I.of(_sre.L));
+        sreMod.setAttr("MULTILINE", $I.of(_sre.MULTILINE));
+        sreMod.setAttr("M", $I.of(_sre.M));
+        sreMod.setAttr("DOTALL", $I.of(_sre.DOTALL));
+        sreMod.setAttr("S", $I.of(_sre.S));
+        sreMod.setAttr("UNICODE", $I.of(_sre.UNICODE));
+        sreMod.setAttr("U", $I.of(_sre.U));
+        sreMod.setAttr("VERBOSE", $I.of(_sre.VERBOSE));
+        sreMod.setAttr("X", $I.of(_sre.X));
+        sreMod.setAttr("ASCII", $I.of(_sre.ASCII));
+        sreMod.setAttr("A", $I.of(_sre.A));
+        
+        // Functions
+        sreMod.setAttr("compile", new $O() {
+            @Override public $O __call__($O... args) { 
+                return args.length > 1 ? _sre.compile(args[0], args[1]) : _sre.compile(args[0]); 
+            }
+            @Override public $S __repr__() { return $S.of("<function compile>"); }
+        });
+        sreMod.setAttr("search", new $O() {
+            @Override public $O __call__($O... args) { 
+                return args.length > 2 ? _sre.search(args[0], args[1], args[2]) : _sre.search(args[0], args[1]); 
+            }
+            @Override public $S __repr__() { return $S.of("<function search>"); }
+        });
+        sreMod.setAttr("match", new $O() {
+            @Override public $O __call__($O... args) { 
+                return args.length > 2 ? _sre.match(args[0], args[1], args[2]) : _sre.match(args[0], args[1]); 
+            }
+            @Override public $S __repr__() { return $S.of("<function match>"); }
+        });
+        sreMod.setAttr("fullmatch", new $O() {
+            @Override public $O __call__($O... args) { 
+                return args.length > 2 ? _sre.fullmatch(args[0], args[1], args[2]) : _sre.fullmatch(args[0], args[1]); 
+            }
+            @Override public $S __repr__() { return $S.of("<function fullmatch>"); }
+        });
+        sreMod.setAttr("findall", new $O() {
+            @Override public $O __call__($O... args) { 
+                return args.length > 2 ? _sre.findall(args[0], args[1], args[2]) : _sre.findall(args[0], args[1]); 
+            }
+            @Override public $S __repr__() { return $S.of("<function findall>"); }
+        });
+        sreMod.setAttr("finditer", new $O() {
+            @Override public $O __call__($O... args) { 
+                return args.length > 2 ? _sre.finditer(args[0], args[1], args[2]) : _sre.finditer(args[0], args[1]); 
+            }
+            @Override public $S __repr__() { return $S.of("<function finditer>"); }
+        });
+        sreMod.setAttr("sub", new $O() {
+            @Override public $O __call__($O... args) { 
+                if (args.length > 4) return _sre.sub(args[0], args[1], args[2], args[3], args[4]);
+                if (args.length > 3) return _sre.sub(args[0], args[1], args[2], args[3]);
+                return _sre.sub(args[0], args[1], args[2]); 
+            }
+            @Override public $S __repr__() { return $S.of("<function sub>"); }
+        });
+        sreMod.setAttr("split", new $O() {
+            @Override public $O __call__($O... args) { 
+                if (args.length > 3) return _sre.split(args[0], args[1], args[2], args[3]);
+                if (args.length > 2) return _sre.split(args[0], args[1], args[2]);
+                return _sre.split(args[0], args[1]); 
+            }
+            @Override public $S __repr__() { return $S.of("<function split>"); }
+        });
+        sreMod.setAttr("escape", new $O() {
+            @Override public $O __call__($O... args) { return _sre.escape(args[0]); }
+            @Override public $S __repr__() { return $S.of("<function escape>"); }
+        });
+        
+        modules.put("_sre", sreMod);
+        modules.put("re", sreMod);  // Also register as 're' for direct import
+        
+        // _io - I/O module
+        $Mod ioMod = new $Mod("_io");
+        ioMod.setAttr("DEFAULT_BUFFER_SIZE", $I.of(_io.DEFAULT_BUFFER_SIZE));
+        ioMod.setAttr("SEEK_SET", $I.of(_io.SEEK_SET));
+        ioMod.setAttr("SEEK_CUR", $I.of(_io.SEEK_CUR));
+        ioMod.setAttr("SEEK_END", $I.of(_io.SEEK_END));
+        
+        // I/O classes
+        ioMod.setAttr("FileIO", new $O() {
+            @Override public $O __call__($O... args) {
+                return new _io.FileIO(args[0],
+                    args.length > 1 ? args[1] : $S.of("r"),
+                    args.length > 2 ? args[2] : $B.TRUE,
+                    args.length > 3 ? args[3] : $N.INSTANCE);
+            }
+            @Override public $S __repr__() { return $S.of("<class '_io.FileIO'>"); }
+        });
+        ioMod.setAttr("BufferedReader", new $O() {
+            @Override public $O __call__($O... args) {
+                _io.RawIOBase raw = (_io.RawIOBase)args[0];
+                int size = args.length > 1 && args[1] instanceof $I ? (int)(($I)args[1]).value : _io.DEFAULT_BUFFER_SIZE;
+                return new _io.BufferedReader(raw, size);
+            }
+            @Override public $S __repr__() { return $S.of("<class '_io.BufferedReader'>"); }
+        });
+        ioMod.setAttr("BufferedWriter", new $O() {
+            @Override public $O __call__($O... args) {
+                _io.RawIOBase raw = (_io.RawIOBase)args[0];
+                int size = args.length > 1 && args[1] instanceof $I ? (int)(($I)args[1]).value : _io.DEFAULT_BUFFER_SIZE;
+                return new _io.BufferedWriter(raw, size);
+            }
+            @Override public $S __repr__() { return $S.of("<class '_io.BufferedWriter'>"); }
+        });
+        ioMod.setAttr("TextIOWrapper", new $O() {
+            @Override public $O __call__($O... args) {
+                _io.BufferedIOBase buf = (_io.BufferedIOBase)args[0];
+                return new _io.TextIOWrapper(buf,
+                    args.length > 1 ? args[1] : $N.INSTANCE,
+                    args.length > 2 ? args[2] : $N.INSTANCE,
+                    args.length > 3 ? args[3] : $N.INSTANCE,
+                    args.length > 4 ? args[4] : $B.FALSE);
+            }
+            @Override public $S __repr__() { return $S.of("<class '_io.TextIOWrapper'>"); }
+        });
+        ioMod.setAttr("BytesIO", new $O() {
+            @Override public $O __call__($O... args) {
+                return args.length > 0 ? new _io.BytesIO(args[0]) : new _io.BytesIO();
+            }
+            @Override public $S __repr__() { return $S.of("<class '_io.BytesIO'>"); }
+        });
+        ioMod.setAttr("StringIO", new $O() {
+            @Override public $O __call__($O... args) {
+                return args.length > 0 ? new _io.StringIO(args[0]) : new _io.StringIO();
+            }
+            @Override public $S __repr__() { return $S.of("<class '_io.StringIO'>"); }
+        });
+        ioMod.setAttr("open", new $O() {
+            @Override public $O __call__($O... args) {
+                return _io.open(args[0],
+                    args.length > 1 ? args[1] : $S.of("r"),
+                    args.length > 2 ? args[2] : $I.of(-1),
+                    args.length > 3 ? args[3] : $N.INSTANCE,
+                    args.length > 4 ? args[4] : $N.INSTANCE,
+                    args.length > 5 ? args[5] : $N.INSTANCE,
+                    args.length > 6 ? args[6] : $B.TRUE,
+                    args.length > 7 ? args[7] : $N.INSTANCE);
+            }
+            @Override public $S __repr__() { return $S.of("<built-in function open>"); }
+        });
+        
+        modules.put("_io", ioMod);
+        modules.put("io", ioMod);  // Also register as 'io' for direct import
+        
+        // _socket - Network sockets
+        $Mod socketMod = new $Mod("socket");
+        // Address families
+        socketMod.setAttr("AF_INET", $I.of(_socket.AF_INET));
+        socketMod.setAttr("AF_INET6", $I.of(_socket.AF_INET6));
+        socketMod.setAttr("AF_UNIX", $I.of(_socket.AF_UNIX));
+        socketMod.setAttr("AF_UNSPEC", $I.of(_socket.AF_UNSPEC));
+        // Socket types
+        socketMod.setAttr("SOCK_STREAM", $I.of(_socket.SOCK_STREAM));
+        socketMod.setAttr("SOCK_DGRAM", $I.of(_socket.SOCK_DGRAM));
+        socketMod.setAttr("SOCK_RAW", $I.of(_socket.SOCK_RAW));
+        // Protocols
+        socketMod.setAttr("IPPROTO_TCP", $I.of(_socket.IPPROTO_TCP));
+        socketMod.setAttr("IPPROTO_UDP", $I.of(_socket.IPPROTO_UDP));
+        socketMod.setAttr("IPPROTO_IP", $I.of(_socket.IPPROTO_IP));
+        // Socket options
+        socketMod.setAttr("SOL_SOCKET", $I.of(_socket.SOL_SOCKET));
+        socketMod.setAttr("SO_REUSEADDR", $I.of(_socket.SO_REUSEADDR));
+        socketMod.setAttr("SO_KEEPALIVE", $I.of(_socket.SO_KEEPALIVE));
+        socketMod.setAttr("SO_BROADCAST", $I.of(_socket.SO_BROADCAST));
+        socketMod.setAttr("SO_RCVBUF", $I.of(_socket.SO_RCVBUF));
+        socketMod.setAttr("SO_SNDBUF", $I.of(_socket.SO_SNDBUF));
+        socketMod.setAttr("TCP_NODELAY", $I.of(_socket.TCP_NODELAY));
+        // Shutdown
+        socketMod.setAttr("SHUT_RD", $I.of(_socket.SHUT_RD));
+        socketMod.setAttr("SHUT_WR", $I.of(_socket.SHUT_WR));
+        socketMod.setAttr("SHUT_RDWR", $I.of(_socket.SHUT_RDWR));
+        // Special addresses
+        socketMod.setAttr("INADDR_ANY", _socket.INADDR_ANY);
+        socketMod.setAttr("INADDR_BROADCAST", _socket.INADDR_BROADCAST);
+        socketMod.setAttr("INADDR_LOOPBACK", _socket.INADDR_LOOPBACK);
+        
+        // socket class
+        socketMod.setAttr("socket", new $O() {
+            @Override public $O __call__($O... args) {
+                return new _socket.socket(
+                    args.length > 0 ? args[0] : $I.of(_socket.AF_INET),
+                    args.length > 1 ? args[1] : $I.of(_socket.SOCK_STREAM),
+                    args.length > 2 ? args[2] : $I.of(0)
+                );
+            }
+            @Override public $S __repr__() { return $S.of("<class 'socket.socket'>"); }
+        });
+        
+        // Helper functions
+        socketMod.setAttr("gethostname", new $O() {
+            @Override public $O __call__($O... args) { return _socket.gethostname(); }
+        });
+        socketMod.setAttr("gethostbyname", new $O() {
+            @Override public $O __call__($O... args) { return _socket.gethostbyname(args[0]); }
+        });
+        socketMod.setAttr("getaddrinfo", new $O() {
+            @Override public $O __call__($O... args) {
+                return _socket.getaddrinfo(
+                    args[0], args[1],
+                    args.length > 2 ? args[2] : $I.of(_socket.AF_UNSPEC),
+                    args.length > 3 ? args[3] : $I.of(0),
+                    args.length > 4 ? args[4] : $I.of(0),
+                    args.length > 5 ? args[5] : $I.of(0)
+                );
+            }
+        });
+        socketMod.setAttr("inet_aton", new $O() {
+            @Override public $O __call__($O... args) { return _socket.inet_aton(args[0]); }
+        });
+        socketMod.setAttr("inet_ntoa", new $O() {
+            @Override public $O __call__($O... args) { return _socket.inet_ntoa(args[0]); }
+        });
+        socketMod.setAttr("create_connection", new $O() {
+            @Override public $O __call__($O... args) {
+                return _socket.create_connection(args[0], args.length > 1 ? args[1] : $N.INSTANCE);
+            }
+        });
+        
+        modules.put("_socket", socketMod);
+        modules.put("socket", socketMod);  // Also register as 'socket' for direct import
+    }
     
     /**
      * Set a global variable.
@@ -33,44 +498,419 @@ public final class $G {
     
     /**
      * Import a module by name.
-     * First checks if already loaded, then attempts to load the Java class.
+     * First checks if already loaded, then searches sys.path for the module.
      */
     public static $Mod importModule(String name) {
+        return importModule(name, null, 0);
+    }
+    
+    /**
+     * Import a module with package context (for relative imports).
+     * @param name Module name (absolute or relative)
+     * @param packageName Package context for relative imports (can be null)
+     * @param level Number of parent packages to go up (0 = absolute, 1 = current package, etc.)
+     */
+    public static $Mod importModule(String name, String packageName, int level) {
+        String fullName = name;
+        
+        // Handle relative imports
+        if (level > 0) {
+            if (packageName == null || packageName.isEmpty()) {
+                throw new $X("ImportError", "attempted relative import with no known parent package");
+            }
+            
+            // Split package into parts
+            String[] parts = packageName.split("\\.");
+            if (level > parts.length) {
+                throw new $X("ImportError", "attempted relative import beyond top-level package");
+            }
+            
+            // Build the base package (going up 'level' levels)
+            StringBuilder base = new StringBuilder();
+            for (int i = 0; i < parts.length - level + 1; i++) {
+                if (i > 0) base.append(".");
+                base.append(parts[i]);
+            }
+            
+            // Append the name if provided
+            if (name != null && !name.isEmpty()) {
+                if (base.length() > 0) {
+                    base.append(".");
+                }
+                base.append(name);
+            }
+            fullName = base.toString();
+        }
+        
         // Check if already loaded
-        $Mod existing = modules.get(name);
+        $Mod existing = modules.get(fullName);
         if (existing != null) {
             return existing;
         }
         
-        // Convert Python module name to Java class name
-        // foo.bar -> foo$bar (using $ as separator in class name)
+        // For dotted names, ensure parent packages are loaded first
+        int lastDot = fullName.lastIndexOf('.');
+        if (lastDot > 0) {
+            String parentName = fullName.substring(0, lastDot);
+            if (!modules.containsKey(parentName)) {
+                importModule(parentName, null, 0);
+            }
+        }
+        
+        // Try to find and load the module
+        Class<?> clazz = findModuleClass(fullName);
+        if (clazz == null) {
+            throw new $X("ModuleNotFoundError", "No module named '" + fullName + "'");
+        }
+        
+        $Mod mod = new $Mod(fullName, clazz);
+        modules.put(fullName, mod);
+        
+        // Save current globals and package context
+        Map<String, $O> savedGlobals = new HashMap<>(globals);
+        String savedPackage = currentPackage;
+        globals.clear();
+        
+        // Set current package for any nested imports
+        currentPackage = mod.name.contains(".") ? 
+            mod.name.substring(0, mod.name.lastIndexOf('.')) : "";
+        
+        // Initialize the module
+        mod.initialize();
+        
+        // Copy all globals created by module to the module object
+        for (Map.Entry<String, $O> entry : globals.entrySet()) {
+            mod.setAttr(entry.getKey(), entry.getValue());
+        }
+        
+        // Restore original globals and package context
+        globals.clear();
+        globals.putAll(savedGlobals);
+        currentPackage = savedPackage;
+        
+        return mod;
+    }
+    
+    /**
+     * Import all public names from a module into globals.
+     * Implements 'from module import *'.
+     */
+    public static void importStar($Mod mod) {
+        $L publicNames = mod.getPublicNames();
+        for ($O nameObj : publicNames.items) {
+            if (nameObj instanceof $S) {
+                String name = (($S)nameObj).value;
+                try {
+                    $O value = mod.getAttr(name);
+                    globals.put(name, value);
+                } catch ($X e) {
+                    // Skip if attribute not found (shouldn't happen)
+                }
+            }
+        }
+    }
+    
+    /**
+     * Find a module class by searching sys.path.
+     */
+    private static Class<?> findModuleClass(String name) {
+        // Convert Python module name to class name
+        // foo.bar -> foo$bar (using $ as separator, or try foo/bar as package)
         String className = name.replace(".", "$");
         
+        // First try direct class loading (for modules on classpath)
         try {
-            // Try to load the class
-            Class<?> clazz = Class.forName(className);
-            $Mod mod = new $Mod(name, clazz);
-            modules.put(name, mod);
+            return Class.forName(className);
+        } catch (ClassNotFoundException e) {
+            // Continue to search sys.path
+        }
+        
+        // Also try the dotted name directly (some class loaders support it)
+        try {
+            return Class.forName(name);
+        } catch (ClassNotFoundException e) {
+            // Continue
+        }
+        
+        // Search sys.path for .class files
+        String classFileName = className + ".class";
+        String packagePath = name.replace(".", "/");
+        
+        for ($O pathObj : $Sys.path.items) {
+            if (!(pathObj instanceof $S)) continue;
+            String pathStr = (($S)pathObj).value;
             
-            // Save current globals, clear them, run module, collect module globals
-            Map<String, $O> savedGlobals = new HashMap<>(globals);
-            globals.clear();
-            
-            mod.initialize();
-            
-            // Copy all globals created by module to the module object
-            for (Map.Entry<String, $O> entry : globals.entrySet()) {
-                mod.setAttr(entry.getKey(), entry.getValue());
+            File dir = new File(pathStr);
+            if (!dir.isDirectory()) {
+                // Could be a JAR file - skip for now
+                continue;
             }
             
-            // Restore original globals
-            globals.clear();
-            globals.putAll(savedGlobals);
+            // Try as a simple class file
+            File classFile = new File(dir, classFileName);
+            if (classFile.exists()) {
+                try {
+                    URL[] urls = { dir.toURI().toURL() };
+                    URLClassLoader loader = new URLClassLoader(urls, $G.class.getClassLoader());
+                    return loader.loadClass(className);
+                } catch (Exception e) {
+                    // Continue searching
+                }
+            }
             
-            return mod;
-        } catch (ClassNotFoundException e) {
-            throw new $X("ModuleNotFoundError: No module named '" + name + "'");
+            // Try as a package (directory with __init__.py compiled to __init__.class)
+            File packageDir = new File(dir, packagePath);
+            if (packageDir.isDirectory()) {
+                File initFile = new File(packageDir, "__init__.class");
+                if (initFile.exists()) {
+                    try {
+                        URL[] urls = { dir.toURI().toURL() };
+                        URLClassLoader loader = new URLClassLoader(urls, $G.class.getClassLoader());
+                        String initClassName = name.replace(".", "/") + "/__init__";
+                        initClassName = initClassName.replace("/", "$");
+                        return loader.loadClass(initClassName);
+                    } catch (Exception e) {
+                        // Continue searching
+                    }
+                }
+            }
         }
+        
+        // Try to compile from CPython stdlib
+        Class<?> stdlibClass = compileStdlibModule(name);
+        if (stdlibClass != null) {
+            return stdlibClass;
+        }
+        
+        return null;
+    }
+    
+    /**
+     * Compile a module from CPython stdlib on demand.
+     * @param name Module name (e.g., "os", "os.path", "collections")
+     * @return The loaded class, or null if not found/compilable
+     */
+    private static Class<?> compileStdlibModule(String name) {
+        String stdlibPath = getCPythonStdlib();
+        if (stdlibPath == null) {
+            return null;
+        }
+        
+        String compiler = getLorettaCompiler();
+        if (compiler == null) {
+            return null;
+        }
+        
+        File cacheDir = getStdlibCacheDir();
+        String className = name.replace(".", "$");
+        
+        // Check if already compiled in cache
+        File cachedClass = new File(cacheDir, className + ".class");
+        if (cachedClass.exists()) {
+            try {
+                URL[] urls = { cacheDir.toURI().toURL() };
+                URLClassLoader loader = new URLClassLoader(urls, $G.class.getClassLoader());
+                return loader.loadClass(className);
+            } catch (Exception e) {
+                // Fall through to recompile
+            }
+        }
+        
+        // Find the .py source file
+        String modulePath = name.replace(".", "/");
+        File sourceFile = null;
+        
+        // Try as module.py
+        File simpleSource = new File(stdlibPath, modulePath + ".py");
+        if (simpleSource.exists()) {
+            sourceFile = simpleSource;
+        } else {
+            // Try as package/__init__.py
+            File packageInit = new File(stdlibPath, modulePath + "/__init__.py");
+            if (packageInit.exists()) {
+                sourceFile = packageInit;
+            }
+        }
+        
+        if (sourceFile == null) {
+            return null;
+        }
+        
+        // Compile the module
+        try {
+            ProcessBuilder pb = new ProcessBuilder(
+                compiler,
+                "-o", cacheDir.getAbsolutePath(),
+                sourceFile.getAbsolutePath()
+            );
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            
+            // Read output (for debugging)
+            BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                // Could log this for debugging
+            }
+            
+            int exitCode = p.waitFor();
+            if (exitCode != 0) {
+                return null;
+            }
+            
+            // Load the compiled class
+            URL[] urls = { cacheDir.toURI().toURL() };
+            URLClassLoader loader = new URLClassLoader(urls, $G.class.getClassLoader());
+            
+            // For packages, the class name might be different
+            if (sourceFile.getName().equals("__init__.py")) {
+                // Package init - try different class name patterns
+                String initClassName = name + "$__init__";
+                try {
+                    return loader.loadClass(initClassName.replace(".", "$"));
+                } catch (ClassNotFoundException e) {
+                    // Try without __init__
+                    return loader.loadClass(className);
+                }
+            }
+            
+            return loader.loadClass(className);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+    
+    /**
+     * Get the current package context (for relative imports).
+     */
+    public static String getCurrentPackage() {
+        return currentPackage;
+    }
+    
+    /**
+     * Set the current package context.
+     */
+    public static void setCurrentPackage(String pkg) {
+        currentPackage = pkg != null ? pkg : "";
+    }
+    
+    /**
+     * Get the CPython stdlib path, auto-detecting if needed.
+     * @return Path to CPython's Lib directory, or null if not found
+     */
+    public static String getCPythonStdlib() {
+        if (cpythonStdlibPath != null) {
+            return cpythonStdlibPath;
+        }
+        
+        // First check environment variable
+        String envPath = System.getenv("CPYTHON_STDLIB_PATH");
+        if (envPath != null && new File(envPath).isDirectory()) {
+            cpythonStdlibPath = envPath;
+            return cpythonStdlibPath;
+        }
+        
+        // Auto-detect from python3
+        try {
+            ProcessBuilder pb = new ProcessBuilder("python3", "-c",
+                "import sys; print(sys.prefix); print('.'.join(map(str, sys.version_info[:2])))");
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()));
+            String prefix = reader.readLine();
+            String version = reader.readLine();
+            p.waitFor();
+            
+            if (prefix != null && version != null) {
+                // Try common locations for stdlib
+                String[] candidates = {
+                    prefix + "/lib/python" + version,
+                    prefix + "/Lib",  // Windows
+                    "/usr/lib/python" + version,
+                    "/usr/local/lib/python" + version
+                };
+                
+                for (String candidate : candidates) {
+                    File dir = new File(candidate);
+                    if (dir.isDirectory() && new File(dir, "os.py").exists()) {
+                        cpythonStdlibPath = candidate;
+                        return cpythonStdlibPath;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // Fall through to return null
+        }
+        
+        return null;
+    }
+    
+    /**
+     * Get the Loretta compiler path.
+     */
+    public static String getLorettaCompiler() {
+        if (lorettaCompilerPath != null) {
+            return lorettaCompilerPath;
+        }
+        
+        // Check environment variable
+        String envPath = System.getenv("LORETTA_COMPILER");
+        if (envPath != null && new File(envPath).canExecute()) {
+            lorettaCompilerPath = envPath;
+            return lorettaCompilerPath;
+        }
+        
+        // Try to find relative to the runtime JAR location
+        try {
+            String jarPath = $G.class.getProtectionDomain().getCodeSource().getLocation().getPath();
+            File jarFile = new File(jarPath);
+            // Assume structure: runtime/loretta.jar, compiler is at ../loretta
+            File compilerFile = new File(jarFile.getParentFile().getParentFile(), "loretta");
+            if (compilerFile.canExecute()) {
+                lorettaCompilerPath = compilerFile.getAbsolutePath();
+                return lorettaCompilerPath;
+            }
+        } catch (Exception e) {
+            // Fall through
+        }
+        
+        // Try PATH
+        String[] pathDirs = System.getenv("PATH").split(File.pathSeparator);
+        for (String dir : pathDirs) {
+            File compiler = new File(dir, "loretta");
+            if (compiler.canExecute()) {
+                lorettaCompilerPath = compiler.getAbsolutePath();
+                return lorettaCompilerPath;
+            }
+        }
+        
+        return null;
+    }
+    
+    /**
+     * Get the stdlib cache directory, creating if needed.
+     */
+    public static File getStdlibCacheDir() {
+        if (stdlibCacheDir != null) {
+            return stdlibCacheDir;
+        }
+        
+        String tmpDir = System.getProperty("java.io.tmpdir");
+        stdlibCacheDir = new File(tmpDir, "loretta_stdlib_cache");
+        if (!stdlibCacheDir.exists()) {
+            stdlibCacheDir.mkdirs();
+        }
+        
+        // Add to sys.path if not already there
+        String cachePath = stdlibCacheDir.getAbsolutePath();
+        for ($O p : $Sys.path.items) {
+            if (p instanceof $S && (($S)p).value.equals(cachePath)) {
+                return stdlibCacheDir;
+            }
+        }
+        $Sys.path.insert($I.of(0), $S.of(cachePath));
+        
+        return stdlibCacheDir;
     }
     
     /**
@@ -189,8 +1029,46 @@ public final class $G {
             case "True": return $B.TRUE;
             case "False": return $B.FALSE;
             case "None": return $N.INSTANCE;
+            // Exception classes
+            case "BaseException": return ExceptionClasses.BaseException;
+            case "Exception": return ExceptionClasses.Exception;
+            case "SystemExit": return ExceptionClasses.SystemExit;
+            case "KeyboardInterrupt": return ExceptionClasses.KeyboardInterrupt;
+            case "GeneratorExit": return ExceptionClasses.GeneratorExit;
+            case "StopIteration": return ExceptionClasses.StopIteration;
+            case "StopAsyncIteration": return ExceptionClasses.StopAsyncIteration;
+            case "ArithmeticError": return ExceptionClasses.ArithmeticError;
+            case "ZeroDivisionError": return ExceptionClasses.ZeroDivisionError;
+            case "OverflowError": return ExceptionClasses.OverflowError;
+            case "AssertionError": return ExceptionClasses.AssertionError;
+            case "AttributeError": return ExceptionClasses.AttributeError;
+            case "EOFError": return ExceptionClasses.EOFError;
+            case "TypeError": return ExceptionClasses.TypeError;
+            case "ValueError": return ExceptionClasses.ValueError;
+            case "UnicodeError": return ExceptionClasses.UnicodeError;
+            case "ImportError": return ExceptionClasses.ImportError;
+            case "ModuleNotFoundError": return ExceptionClasses.ModuleNotFoundError;
+            case "LookupError": return ExceptionClasses.LookupError;
+            case "IndexError": return ExceptionClasses.IndexError;
+            case "KeyError": return ExceptionClasses.KeyError;
+            case "NameError": return ExceptionClasses.NameError;
+            case "UnboundLocalError": return ExceptionClasses.UnboundLocalError;
+            case "OSError": return ExceptionClasses.OSError;
+            case "IOError": return ExceptionClasses.OSError;
+            case "FileExistsError": return ExceptionClasses.FileExistsError;
+            case "FileNotFoundError": return ExceptionClasses.FileNotFoundError;
+            case "IsADirectoryError": return ExceptionClasses.IsADirectoryError;
+            case "NotADirectoryError": return ExceptionClasses.NotADirectoryError;
+            case "PermissionError": return ExceptionClasses.PermissionError;
+            case "RuntimeError": return ExceptionClasses.RuntimeError;
+            case "NotImplementedError": return ExceptionClasses.NotImplementedError;
+            case "RecursionError": return ExceptionClasses.RecursionError;
+            case "SyntaxError": return ExceptionClasses.SyntaxError;
+            case "Warning": return ExceptionClasses.Warning;
+            case "DeprecationWarning": return ExceptionClasses.DeprecationWarning;
+            case "UserWarning": return ExceptionClasses.UserWarning;
             default:
-                throw new $X("NameError", "name '" + name + "' is not defined");
+                throw new $X.NameError("name '" + name + "' is not defined");
         }
     }
     
@@ -399,10 +1277,70 @@ public final class $G {
     public static final $O ISINSTANCE = new $O() {
         @Override
         public $O __call__($O... args) {
-            // Simplified - just check type name
-            if (args.length != 2) throw new $X("TypeError", "isinstance() takes 2 arguments");
-            return $B.FALSE; // TODO: proper implementation
+            if (args.length != 2) throw new $X.TypeError("isinstance() takes 2 arguments");
+            $O obj = args[0];
+            $O classinfo = args[1];
+            
+            // Handle tuple of types
+            if (classinfo instanceof $T) {
+                for ($O cls : (($T)classinfo).items) {
+                    if (isInstanceOf(obj, cls)) {
+                        return $B.TRUE;
+                    }
+                }
+                return $B.FALSE;
+            }
+            
+            return $B.of(isInstanceOf(obj, classinfo));
         }
+        
+        private boolean isInstanceOf($O obj, $O cls) {
+            // Check exception types via $XO wrapper
+            if (obj instanceof $XO && cls instanceof $Cls) {
+                $Cls excCls = ($Cls) cls;
+                $X exc = (($XO) obj).exception;
+                
+                // Use Java's instanceof via the javaClass field
+                if (excCls.javaClass != null) {
+                    return excCls.javaClass.isInstance(exc);
+                }
+            }
+            
+            // Check built-in types
+            if (cls instanceof $Cls) {
+                $Cls pyCls = ($Cls) cls;
+                String name = pyCls.name;
+                
+                // Built-in type checks
+                if ("int".equals(name)) return obj instanceof $I;
+                if ("float".equals(name)) return obj instanceof $F;
+                if ("str".equals(name)) return obj instanceof $S;
+                if ("bool".equals(name)) return obj instanceof $B;
+                if ("list".equals(name)) return obj instanceof $L;
+                if ("tuple".equals(name)) return obj instanceof $T;
+                if ("dict".equals(name)) return obj instanceof $D;
+                if ("NoneType".equals(name)) return obj instanceof $N;
+                if ("bytes".equals(name)) return obj instanceof $BY;
+                if ("set".equals(name)) return obj instanceof $ST;
+                
+                // User-defined class check
+                if (obj instanceof $Inst) {
+                    $Inst inst = ($Inst) obj;
+                    return isSubclass(inst.type, pyCls);
+                }
+            }
+            
+            return false;
+        }
+        
+        private boolean isSubclass($Cls sub, $Cls sup) {
+            if (sub == sup) return true;
+            for ($Cls base : sub.bases) {
+                if (isSubclass(base, sup)) return true;
+            }
+            return false;
+        }
+        
         @Override
         public $S __repr__() { return $S.of("<built-in function isinstance>"); }
     };
@@ -967,14 +1905,15 @@ public final class $G {
     public static final $O OPEN = new $O() {
         @Override
         public $O __call__($O... args) {
-            if (args.length < 1) throw new $X("TypeError", "open() requires at least 1 argument");
-            String filename = (($S)args[0]).value;
-            String mode = args.length > 1 ? (($S)args[1]).value : "r";
-            try {
-                return new $File(filename, mode);
-            } catch (java.io.IOException e) {
-                throw new $X("FileNotFoundError", e.getMessage());
-            }
+            if (args.length < 1) throw new $X.TypeError("open() requires at least 1 argument");
+            return _io.open(args[0],
+                args.length > 1 ? args[1] : $S.of("r"),
+                args.length > 2 ? args[2] : $I.of(-1),
+                args.length > 3 ? args[3] : $N.INSTANCE,
+                args.length > 4 ? args[4] : $N.INSTANCE,
+                args.length > 5 ? args[5] : $N.INSTANCE,
+                args.length > 6 ? args[6] : $B.TRUE,
+                args.length > 7 ? args[7] : $N.INSTANCE);
         }
         @Override
         public $S __repr__() { return $S.of("<built-in function open>"); }
@@ -1426,10 +2365,10 @@ class $RI extends $O {
     @Override
     public $O __next__() {
         if (range.step > 0 && current >= range.stop) {
-            throw new $X("StopIteration", "");
+            throw new $X.StopIteration();
         }
         if (range.step < 0 && current <= range.stop) {
-            throw new $X("StopIteration", "");
+            throw new $X.StopIteration();
         }
         long result = current;
         current += range.step;

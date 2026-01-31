@@ -303,7 +303,7 @@ class $BYI extends $O {
     @Override
     public $O __next__() {
         if (index >= bytes.data.length) {
-            throw new $X("StopIteration", "");
+            throw new $X.StopIteration();
         }
         return $I.of(bytes.data[index++] & 0xFF);
     }
