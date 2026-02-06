@@ -29,4 +29,15 @@ print("Before:", message)
 change_message()
 print("After:", message)
 
+# Augmented assignment on global
+total = 0
+
+def add_to_total(n):
+    global total
+    total += n
+
+add_to_total(10)
+add_to_total(5)
+print("total after += (10 and 5):", total)
+
 print("Done!")

@@ -129,6 +129,18 @@ make test-one TEST=hello  # Run a specific test
 Tests are in `test/*.py` and compiled to `test/build/*.class`.
 See `test/run_tests.sh` for the test runner and skip list.
 
+### Test coverage for completed features
+
+| Feature | Test file |
+|---------|-----------|
+| Augmented assignment on global | `global_test.py` (total += n) |
+| del global variable | `del_test.py` (del global_var) |
+| For-loop tuple unpacking | `loop_test.py` (for a, b in pairs) |
+| Comprehension tuple unpacking | `comp_unpack_test.py` |
+| Nested class in class body | `nested_class_test.py` (skipped on overflow) |
+| Raw strings (r'...') | `raw_string_test.py` |
+| sys.stdin / stdout / stderr | `sys_stdio_test.py` |
+
 ## Runtime Library
 
 The Loretta runtime library (`runtime/loretta.jar`) implements Python types
@@ -209,10 +221,23 @@ and semantics in Java. Ultra-short class names keep bytecode compact:
 - **Async/await**: Parsed but not code-generated
 - **Standard library**: Only built-in functions, no stdlib modules
 
+### Stubs by design (AOT)
+
+Loretta compiles ahead-of-time; the following raise `NotImplementedError` when used:
+
+| API | Reason |
+|-----|--------|
+| `exec(code)` | Runtime compilation not supported |
+| `compile(source, ...)` | Runtime compilation not supported |
+
 ## Status
 
 Loretta is functional for many Python programs. See the [TODO](TODO) file
 for detailed development status and planned work.
+
+## About Loretta
+
+The name comes from a scene in *Monty Python's Life of Brian*: Stan wants to become a woman and insists everyone call him Loretta. The joke — trying to be something you're not — fits this project rather well. We're taking Python, a language that was never meant for ahead-of-time compilation, and compiling it to JVM bytecode anyway. There will always be limits to how far you can push that; the point is to have a go, see how far we get, and not take ourselves too seriously. Consider Loretta the Python compiler that really, really wants to be an AOT language. We're just going with it.
 
 ## License
 

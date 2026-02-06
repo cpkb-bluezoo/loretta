@@ -286,7 +286,33 @@ static void analyze_statement(analyzer_t *analyzer, ast_node_t *node)
                                            node->data.func_def.name);
             analyzer->current_scope = func_scope;
 
-            /* TODO: Define parameters in function scope */
+            /* Define parameters in function scope */
+            ast_node_t *args_node = node->data.func_def.args;
+            if (args_node && args_node->type == AST_ARGUMENTS) {
+                for (slist_t *s = args_node->data.arguments.posonlyargs; s; s = s->next) {
+                    ast_node_t *arg = s->data;
+                    if (arg->type == AST_ARG && arg->data.arg.arg)
+                        scope_define(func_scope, arg->data.arg.arg, SYM_PARAMETER);
+                }
+                for (slist_t *s = args_node->data.arguments.args; s; s = s->next) {
+                    ast_node_t *arg = s->data;
+                    if (arg->type == AST_ARG && arg->data.arg.arg)
+                        scope_define(func_scope, arg->data.arg.arg, SYM_PARAMETER);
+                }
+                if (args_node->data.arguments.vararg &&
+                    args_node->data.arguments.vararg->type == AST_ARG &&
+                    args_node->data.arguments.vararg->data.arg.arg)
+                    scope_define(func_scope, args_node->data.arguments.vararg->data.arg.arg, SYM_PARAMETER);
+                for (slist_t *s = args_node->data.arguments.kwonlyargs; s; s = s->next) {
+                    ast_node_t *arg = s->data;
+                    if (arg->type == AST_ARG && arg->data.arg.arg)
+                        scope_define(func_scope, arg->data.arg.arg, SYM_PARAMETER);
+                }
+                if (args_node->data.arguments.kwarg &&
+                    args_node->data.arguments.kwarg->type == AST_ARG &&
+                    args_node->data.arguments.kwarg->data.arg.arg)
+                    scope_define(func_scope, args_node->data.arguments.kwarg->data.arg.arg, SYM_PARAMETER);
+            }
 
             /* Analyze body */
             for (slist_t *s = node->data.func_def.body; s; s = s->next) {

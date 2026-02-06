@@ -838,6 +838,54 @@ int codegen_get_local(codegen_ctx_t *ctx, const char *name)
     return var ? var->slot : -1;
 }
 
+/**
+ * Return the number of local slots the comprehension target will use
+ * (1 for a single name, N for tuple/list of N names).
+ */
+static int codegen_comp_target_slot_count(ast_node_t *target)
+{
+    if (!target) return 0;
+    if (target->type == AST_NAME) return 1;
+    if (target->type == AST_TUPLE || target->type == AST_LIST) {
+        int n = 0;
+        for (slist_t *e = target->data.collection.elts; e; e = e->next) {
+            if (((ast_node_t *)e->data)->type == AST_NAME) n++;
+        }
+        return n;
+    }
+    return 0;
+}
+
+/**
+ * Remove comprehension loop target variable(s) from the locals table so that
+ * a nested or subsequent comprehension gets fresh slots for the same names.
+ * Frees the local_var_t for each removed name.
+ */
+static void codegen_remove_comp_target_locals(codegen_ctx_t *ctx, ast_node_t *target)
+{
+    if (!target || !ctx->locals) return;
+    if (target->type == AST_NAME) {
+        local_var_t *var = hashtable_remove(ctx->locals, target->data.name.id);
+        if (var) {
+            free(var->name);
+            free(var);
+        }
+        return;
+    }
+    if (target->type == AST_TUPLE || target->type == AST_LIST) {
+        for (slist_t *e = target->data.collection.elts; e; e = e->next) {
+            ast_node_t *elt = e->data;
+            if (elt->type == AST_NAME) {
+                local_var_t *var = hashtable_remove(ctx->locals, elt->data.name.id);
+                if (var) {
+                    free(var->name);
+                    free(var);
+                }
+            }
+        }
+    }
+}
+
 /* ========================================================================
  * Label management
  * ======================================================================== */
@@ -1089,6 +1137,117 @@ void emit_astore(codegen_ctx_t *ctx, int slot)
     }
 }
 
+/**
+ * Parse JVM method descriptor to get argument slot count and return type.
+ * Returns arg_slots, and return_slots (0, 1, or 2).
+ * For return type: 0 = void, 1 = int/float/object, 2 = long/double.
+ * If return is object (L...; or [), out_class (if non-NULL, size at least 256) gets the class name.
+ */
+static void parse_method_descriptor(const char *desc, int *arg_slots, int *return_slots,
+                                    char *out_class, size_t out_class_size)
+{
+    *arg_slots = 0;
+    *return_slots = 0;
+    if (!desc || desc[0] != '(') return;
+    const char *p = desc + 1;
+    /* Parse arguments */
+    while (*p != ')') {
+        switch (*p) {
+            case 'L':
+                while (*p != ';') p++;
+                p++;
+                (*arg_slots)++;
+                break;
+            case '[':
+                while (*p == '[') p++;
+                if (*p == 'L') while (*p != ';') p++;
+                p++;
+                (*arg_slots)++;
+                break;
+            case 'J':
+            case 'D':
+                (*arg_slots) += 2;
+                p++;
+                break;
+            default:
+                (*arg_slots)++;
+                p++;
+                break;
+        }
+    }
+    p++; /* skip ')' */
+    /* Parse return type */
+    switch (*p) {
+        case 'V':
+            *return_slots = 0;
+            break;
+        case 'J':
+        case 'D':
+            *return_slots = 2;
+            break;
+        case 'L':
+            *return_slots = 1;
+            if (out_class && out_class_size > 0) {
+                const char *start = p + 1;
+                while (*p != ';') p++;
+                size_t len = (size_t)(p - start);
+                if (len >= out_class_size) len = out_class_size - 1;
+                memcpy(out_class, start, len);
+                out_class[len] = '\0';
+            }
+            break;
+        case '[':
+            *return_slots = 1;
+            if (out_class && out_class_size > 0)
+                out_class[0] = '\0'; /* array: use object for stackmap */
+            break;
+        case 'I':
+        case 'Z':
+        case 'B':
+        case 'C':
+        case 'S':
+            *return_slots = 1;
+            break;
+        case 'F':
+            *return_slots = 1;
+            break;
+        default:
+            *return_slots = 1;
+            break;
+    }
+}
+
+/** Return type tag for stackmap push after invokestatic */
+typedef enum {
+    RET_VOID, RET_INT, RET_LONG, RET_FLOAT, RET_DOUBLE, RET_OBJECT
+} descriptor_return_kind_t;
+
+static descriptor_return_kind_t descriptor_return_kind(const char *desc)
+{
+    if (!desc) return RET_VOID;
+    const char *p = desc;
+    while (*p != ')') {
+        if (*p == 'L') { while (*p != ';') p++; p++; }
+        else if (*p == '[') { while (*p == '[') p++; if (*p == 'L') while (*p != ';') p++; p++; }
+        else p++;
+    }
+    p++;
+    switch (*p) {
+        case 'V': return RET_VOID;
+        case 'J': return RET_LONG;
+        case 'D': return RET_DOUBLE;
+        case 'F': return RET_FLOAT;
+        case 'I':
+        case 'Z':
+        case 'B':
+        case 'C':
+        case 'S': return RET_INT;
+        case 'L':
+        case '[': return RET_OBJECT;
+        default: return RET_OBJECT;
+    }
+}
+
 void emit_invokestatic(codegen_ctx_t *ctx, const char *class_name,
                         const char *method_name, const char *descriptor)
 {
@@ -1096,7 +1255,35 @@ void emit_invokestatic(codegen_ctx_t *ctx, const char *class_name,
     uint16_t idx = cp_add_methodref(cp, class_name, method_name, descriptor);
     emit_u8(ctx, OP_INVOKESTATIC);
     emit_u16(ctx, idx);
-    /* TODO: Adjust stack based on descriptor */
+
+    int arg_slots, return_slots;
+    char return_class[256];
+    parse_method_descriptor(descriptor, &arg_slots, &return_slots, return_class, sizeof(return_class));
+
+    stack_pop(ctx, arg_slots);
+    if (return_slots > 0) {
+        stack_push(ctx, return_slots);
+    }
+    if (ctx->stackmap) {
+        stackmap_pop(ctx->stackmap, (uint16_t)arg_slots);
+        if (return_slots > 0) {
+            descriptor_return_kind_t kind = descriptor_return_kind(descriptor);
+            if (kind == RET_INT) {
+                stackmap_push_int(ctx->stackmap);
+            } else if (kind == RET_LONG) {
+                stackmap_push_long(ctx->stackmap);
+            } else if (kind == RET_FLOAT) {
+                stackmap_push_float(ctx->stackmap);
+            } else if (kind == RET_DOUBLE) {
+                stackmap_push_double(ctx->stackmap);
+            } else {
+                /* RET_OBJECT or unknown: push object; use parsed class if available */
+                const char *cls = (return_class[0] != '\0') ? return_class : LRT_OBJECT;
+                stackmap_push_object(ctx->stackmap, cp, cls);
+            }
+            /* long/double: stackmap uses single entry (implicit TOP in JVM) */
+        }
+    }
 }
 
 void emit_invokevirtual(codegen_ctx_t *ctx, const char *class_name,
@@ -1252,14 +1439,6 @@ static void emit_py_int(codegen_ctx_t *ctx, int64_t value)
 
     /* Call $I.of(long) to create PyInt */
     emit_invokestatic(ctx, LRT_INT, "of", "(J)" DESC_INT);
-    stack_pop(ctx, 2);  /* long is 2 slots */
-    stack_push(ctx, 1); /* PyInt is 1 slot */
-    /* Update stackmap: pop long (already tracked), push PyInt */
-    if (ctx->stackmap) {
-        const_pool_t *cp = class_writer_get_cp(ctx->cw);
-        stackmap_pop(ctx->stackmap, 2);  /* long takes 2 stackmap slots (long + top) */
-        stackmap_push_object(ctx->stackmap, cp, LRT_INT);
-    }
 }
 
 /**
@@ -1272,14 +1451,6 @@ static void emit_py_float(codegen_ctx_t *ctx, double value)
 
     /* Call $F.of(double) to create PyFloat */
     emit_invokestatic(ctx, LRT_FLOAT, "of", "(D)L" LRT_FLOAT ";");
-    stack_pop(ctx, 2);  /* double is 2 slots */
-    stack_push(ctx, 1);
-    /* Update stackmap: pop double (already tracked), push PyFloat */
-    if (ctx->stackmap) {
-        const_pool_t *cp = class_writer_get_cp(ctx->cw);
-        stackmap_pop(ctx->stackmap, 2);  /* double takes 2 stackmap slots */
-        stackmap_push_object(ctx->stackmap, cp, LRT_FLOAT);
-    }
 }
 
 /**
@@ -1292,13 +1463,6 @@ static void emit_py_str(codegen_ctx_t *ctx, const char *value)
 
     /* Call $S.of(String) to create PyStr */
     emit_invokestatic(ctx, LRT_STR, "of", "(Ljava/lang/String;)" DESC_STR);
-    /* Stack unchanged in count: String -> PyStr */
-    /* Update stackmap: pop String (already tracked), push PyStr */
-    if (ctx->stackmap) {
-        const_pool_t *cp = class_writer_get_cp(ctx->cw);
-        stackmap_pop(ctx->stackmap, 1);
-        stackmap_push_object(ctx->stackmap, cp, LRT_STR);
-    }
 }
 
 /**
@@ -1431,11 +1595,27 @@ static void codegen_comprehension_loop(codegen_ctx_t *ctx, slist_t *generators,
     stackmap_track_indy(ctx, PY_INDY_ITER);
     int iter_slot = codegen_alloc_local(ctx, "$comp_iter");
     emit_astore(ctx, iter_slot);
+    if (ctx->stackmap) {
+        stackmap_pop(ctx->stackmap, 1);
+        const_pool_t *cp_iter = class_writer_get_cp(ctx->cw);
+        stackmap_set_local_object(ctx->stackmap, (uint16_t)iter_slot, cp_iter, LRT_OBJECT);
+    }
 
     /* Loop labels */
     label_t *loop_start = codegen_new_label(ctx);
     label_t *loop_end = codegen_new_label(ctx);
 
+    /* Pre-allocate loop target slots as Top so the frame at loop_start has the same
+     * number of locals as when we merge from the back edge (avoids VerifyError). */
+    {
+        int n = codegen_comp_target_slot_count(target);
+        if (ctx->stackmap && n > 0) {
+            uint16_t base = stackmap_get_locals_count(ctx->stackmap);
+            for (int i = 0; i < n; i++) {
+                stackmap_set_local(ctx->stackmap, (uint16_t)(base + i), vtype_top());
+            }
+        }
+    }
     codegen_mark_label(ctx, loop_start);
 
     /* Get next item (returns null on StopIteration via safeNext) */
@@ -1462,15 +1642,50 @@ static void codegen_comprehension_loop(codegen_ctx_t *ctx, slist_t *generators,
         loop_end_state = stackmap_save_state(ctx->stackmap);
     }
 
-    /* Bind target variable */
+    /* Bind target variable (or unpack into multiple) */
     if (target->type == AST_NAME) {
         int target_slot = codegen_get_local(ctx, target->data.name.id);
         if (target_slot < 0) {
             target_slot = codegen_alloc_local(ctx, target->data.name.id);
         }
         emit_astore(ctx, target_slot);
+    } else if (target->type == AST_TUPLE || target->type == AST_LIST) {
+        slist_t *elts = target->data.collection.elts;
+        int idx = 0;
+        for (slist_t *e = elts; e; e = e->next, idx++) {
+            ast_node_t *elt = e->data;
+            if (elt->type == AST_NAME) {
+                const char *name = elt->data.name.id;
+                emit_u8(ctx, OP_DUP);
+                stack_push(ctx, 1);
+                if (ctx->stackmap) {
+                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                    stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
+                }
+                emit_py_int(ctx, (int64_t)idx);
+                indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache,
+                                    PY_INDY_GETITEM, NULL, 0);
+                stackmap_track_indy(ctx, PY_INDY_GETITEM);
+                stack_pop(ctx, 2);
+                stack_push(ctx, 1);
+                int slot = codegen_get_local(ctx, name);
+                if (slot < 0) {
+                    slot = codegen_alloc_local(ctx, name);
+                }
+                emit_astore(ctx, slot);
+                if (ctx->stackmap) {
+                    stackmap_pop(ctx->stackmap, 1);
+                    const_pool_t *cp_local = class_writer_get_cp(ctx->cw);
+                    stackmap_set_local_object(ctx->stackmap, (uint16_t)slot, cp_local, LRT_OBJECT);
+                }
+            }
+        }
+        emit_u8(ctx, OP_POP);
+        stack_pop(ctx, 1);
+        if (ctx->stackmap) {
+            stackmap_pop(ctx->stackmap, 1);
+        }
     } else {
-        /* TODO: Handle tuple unpacking in comprehensions */
         emit_u8(ctx, OP_POP);
         stack_pop(ctx, 1);
         if (ctx->stackmap) {
@@ -1504,6 +1719,9 @@ static void codegen_comprehension_loop(codegen_ctx_t *ctx, slist_t *generators,
 
     /* Loop back */
     codegen_emit_jump(ctx, OP_GOTO, loop_start);
+
+    /* Remove loop target names so nested/next comprehension gets fresh slots */
+    codegen_remove_comp_target_locals(ctx, target);
 
     /* Restore state for loop_end - this is the state when IFNULL jumps here */
     if (ctx->stackmap && loop_end_state) {
@@ -1551,11 +1769,26 @@ static void codegen_dict_comprehension_loop(codegen_ctx_t *ctx, slist_t *generat
     stackmap_track_indy(ctx, PY_INDY_ITER);
     int iter_slot = codegen_alloc_local(ctx, "$comp_iter");
     emit_astore(ctx, iter_slot);
+    if (ctx->stackmap) {
+        stackmap_pop(ctx->stackmap, 1);
+        const_pool_t *cp_iter = class_writer_get_cp(ctx->cw);
+        stackmap_set_local_object(ctx->stackmap, (uint16_t)iter_slot, cp_iter, LRT_OBJECT);
+    }
 
     /* Loop labels */
     label_t *loop_start = codegen_new_label(ctx);
     label_t *loop_end = codegen_new_label(ctx);
 
+    /* Pre-allocate loop target slots as Top so the frame at loop_start merges correctly. */
+    {
+        int n = codegen_comp_target_slot_count(target);
+        if (ctx->stackmap && n > 0) {
+            uint16_t base = stackmap_get_locals_count(ctx->stackmap);
+            for (int i = 0; i < n; i++) {
+                stackmap_set_local(ctx->stackmap, (uint16_t)(base + i), vtype_top());
+            }
+        }
+    }
     codegen_mark_label(ctx, loop_start);
 
     /* Get next item */
@@ -1582,13 +1815,54 @@ static void codegen_dict_comprehension_loop(codegen_ctx_t *ctx, slist_t *generat
         loop_end_state = stackmap_save_state(ctx->stackmap);
     }
 
-    /* Bind target variable */
+    /* Bind target variable (or unpack into multiple) */
     if (target->type == AST_NAME) {
         int target_slot = codegen_get_local(ctx, target->data.name.id);
         if (target_slot < 0) {
             target_slot = codegen_alloc_local(ctx, target->data.name.id);
         }
         emit_astore(ctx, target_slot);
+        if (ctx->stackmap) {
+            stackmap_pop(ctx->stackmap, 1);
+            const_pool_t *cp_astore = class_writer_get_cp(ctx->cw);
+            stackmap_set_local_object(ctx->stackmap, (uint16_t)target_slot, cp_astore, LRT_OBJECT);
+        }
+    } else if (target->type == AST_TUPLE || target->type == AST_LIST) {
+        slist_t *elts = target->data.collection.elts;
+        int idx = 0;
+        for (slist_t *e = elts; e; e = e->next, idx++) {
+            ast_node_t *elt = e->data;
+            if (elt->type == AST_NAME) {
+                const char *name = elt->data.name.id;
+                emit_u8(ctx, OP_DUP);
+                stack_push(ctx, 1);
+                if (ctx->stackmap) {
+                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                    stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
+                }
+                emit_py_int(ctx, (int64_t)idx);
+                indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache,
+                                    PY_INDY_GETITEM, NULL, 0);
+                stackmap_track_indy(ctx, PY_INDY_GETITEM);
+                stack_pop(ctx, 2);
+                stack_push(ctx, 1);
+                int slot = codegen_get_local(ctx, name);
+                if (slot < 0) {
+                    slot = codegen_alloc_local(ctx, name);
+                }
+                emit_astore(ctx, slot);
+                if (ctx->stackmap) {
+                    stackmap_pop(ctx->stackmap, 1);
+                    const_pool_t *cp_local = class_writer_get_cp(ctx->cw);
+                    stackmap_set_local_object(ctx->stackmap, (uint16_t)slot, cp_local, LRT_OBJECT);
+                }
+            }
+        }
+        emit_u8(ctx, OP_POP);
+        stack_pop(ctx, 1);
+        if (ctx->stackmap) {
+            stackmap_pop(ctx->stackmap, 1);
+        }
     } else {
         emit_u8(ctx, OP_POP);
         stack_pop(ctx, 1);
@@ -1623,6 +1897,9 @@ static void codegen_dict_comprehension_loop(codegen_ctx_t *ctx, slist_t *generat
 
     /* Loop back */
     codegen_emit_jump(ctx, OP_GOTO, loop_start);
+
+    /* Remove loop target names so nested/next comprehension gets fresh slots */
+    codegen_remove_comp_target_locals(ctx, target);
 
     /* Restore state for loop_end - this is the state when IFNULL jumps here */
     if (ctx->stackmap && loop_end_state) {
@@ -1697,12 +1974,6 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
                 emit_ldc_string(ctx, name);
                 emit_invokestatic(ctx, "$G", "builtin",
                                   "(Ljava/lang/String;)" DESC_OBJECT);
-                /* Stack: String -> $O (no count change, but type changes) */
-                if (ctx->stackmap) {
-                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
-                    stackmap_pop(ctx->stackmap, 1);
-                    stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
-                }
                 break;
             }
 
@@ -1727,12 +1998,6 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
                 emit_ldc_string(ctx, name);
                 emit_invokestatic(ctx, "$G", "builtin",
                                   "(Ljava/lang/String;)" DESC_OBJECT);
-                /* Stack: String -> $O (no count change, but type changes) */
-                if (ctx->stackmap) {
-                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
-                    stackmap_pop(ctx->stackmap, 1);
-                    stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
-                }
                 break;
             }
 
@@ -1756,24 +2021,12 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
                     emit_ldc_string(ctx, name);
                     emit_invokestatic(ctx, "$G", "builtin",
                                       "(Ljava/lang/String;)" DESC_OBJECT);
-                    /* Stack: String -> $O (no count change, but type changes) */
-                    if (ctx->stackmap) {
-                        const_pool_t *cp = class_writer_get_cp(ctx->cw);
-                        stackmap_pop(ctx->stackmap, 1);
-                        stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
-                    }
                 }
             } else {
                 /* Global/built-in lookup via $G.builtin(name) */
                 emit_ldc_string(ctx, name);
                 emit_invokestatic(ctx, "$G", "builtin",
                                   "(Ljava/lang/String;)" DESC_OBJECT);
-                /* Stack: String -> $O (no count change, but type changes) */
-                if (ctx->stackmap) {
-                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
-                    stackmap_pop(ctx->stackmap, 1);
-                    stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
-                }
             }
             break;
         }
@@ -1979,12 +2232,8 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
                     /* Store via $G.setGlobal(name, value) */
                     emit_ldc_string(ctx, name);
                     emit_u8(ctx, OP_SWAP);
-                    emit_invokestatic(ctx, "$G", "setGlobal",
-                                      "(Ljava/lang/String;L$O;)V");
-                    stack_pop(ctx, 2);
-                    if (ctx->stackmap) {
-                        stackmap_pop(ctx->stackmap, 2);  /* String + value consumed by setGlobal */
-                    }
+emit_invokestatic(ctx, "$G", "setGlobal",
+                                          "(Ljava/lang/String;L$O;)V");
                 } else {
                     int slot = codegen_get_local(ctx, name);
                     if (slot < 0) {
@@ -2316,13 +2565,6 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
 
             emit_invokestatic(ctx, LRT_DICT, "of",
                               "(" DESC_OBJECT_ARR DESC_OBJECT_ARR ")" DESC_DICT);
-            stack_pop(ctx, 2);
-            stack_push(ctx, 1);
-            if (ctx->stackmap) {
-                const_pool_t *cp = class_writer_get_cp(ctx->cw);
-                stackmap_pop(ctx->stackmap, 2);  /* Two arrays */
-                stackmap_push_object(ctx->stackmap, cp, LRT_DICT);
-            }
             break;
         }
 
@@ -2581,14 +2823,6 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
                 /* No filters - call $GE.of(source, mapper) */
                 emit_invokestatic(ctx, LRT_GENEXP, "of",
                                   "(L$O;L$MH;)L$GE;");
-                stack_pop(ctx, 2);
-                stack_push(ctx, 1);
-                /* Update stackmap: pop source + mapper, push $GE */
-                if (ctx->stackmap) {
-                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
-                    stackmap_pop(ctx->stackmap, 2);
-                    stackmap_push_object(ctx->stackmap, cp, LRT_GENEXP);
-                }
             } else if (num_filters == 1) {
                 /* Single filter - create filter lambda */
                 ast_node_t *filter_lambda = ast_new(AST_LAMBDA, node->line, node->column);
@@ -2600,14 +2834,6 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
 
                 emit_invokestatic(ctx, LRT_GENEXP, "of",
                                   "(L$O;L$MH;L$MH;)L$GE;");
-                stack_pop(ctx, 3);
-                stack_push(ctx, 1);
-                /* Update stackmap: pop source + mapper + filter, push $GE */
-                if (ctx->stackmap) {
-                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
-                    stackmap_pop(ctx->stackmap, 3);
-                    stackmap_push_object(ctx->stackmap, cp, LRT_GENEXP);
-                }
             } else {
                 /* Multiple filters - create array of filter lambdas */
                 emit_iconst(ctx, num_filters);
@@ -2639,14 +2865,6 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
 
                 emit_invokestatic(ctx, LRT_GENEXP, "of",
                                   "(L$O;L$MH;[L$MH;)L$GE;");
-                stack_pop(ctx, 3);
-                stack_push(ctx, 1);
-                /* Update stackmap: pop source + mapper + filters, push $GE */
-                if (ctx->stackmap) {
-                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
-                    stackmap_pop(ctx->stackmap, 3);
-                    stackmap_push_object(ctx->stackmap, cp, LRT_GENEXP);
-                }
             }
 
             /* Note: We're not freeing the synthetic AST nodes - they'll be
@@ -2688,9 +2906,10 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
             break;
         }
 
-        /* Yield from: delegate to sub-iterator */
+        /* Yield from: delegate to sub-iterator (PEP 380).
+         * Proper implementation: iterate sub-iterable and append each value to yield list.
+         * Return value of subgenerator and send/throw/close delegation not implemented. */
         case AST_YIELD_FROM: {
-            /* For now, treat yield from as iterating and yielding each value */
             ast_node_t *iter_expr = node->data.await_yield.value;
 
             if (ctx->yield_list_slot < 0) {
@@ -2703,18 +2922,59 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
                 break;
             }
 
-            /* For yield from, we need to iterate and yield each value
-             * For simplicity, use list.extend() equivalent */
-            emit_aload(ctx, ctx->yield_list_slot);
-            codegen_expr(ctx, iter_expr);
+            /* Get iterator from expression */
+            if (iter_expr) {
+                codegen_expr(ctx, iter_expr);
+            } else {
+                emit_aconst_null(ctx);
+            }
+            indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache, PY_INDY_ITER, NULL, 0);
+            stackmap_track_indy(ctx, PY_INDY_ITER);
 
-            /* Call list.extend(iterable) - need to add to runtime or iterate manually */
-            /* For now, use a simple loop approach inline */
-            /* TODO: Implement proper yield from with extend */
-            emit_invokevirtual(ctx, LRT_LIST, "extend", "(" DESC_OBJECT ")V");
+            int iter_slot = codegen_alloc_local(ctx, "$yf_iter");
+            emit_astore(ctx, iter_slot);
+
+            label_t *loop_start = codegen_new_label(ctx);
+            label_t *end_loop = codegen_new_label(ctx);
+
+            codegen_mark_label(ctx, loop_start);
+
+            /* Get next item (null on StopIteration) */
+            emit_aload(ctx, iter_slot);
+            indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache, PY_INDY_NEXT, NULL, 0);
+            stackmap_track_indy(ctx, PY_INDY_NEXT);
+
+            emit_u8(ctx, OP_DUP);
+            stack_push(ctx, 1);
+            if (ctx->stackmap) {
+                const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
+            }
+            codegen_emit_jump(ctx, OP_IFNULL, end_loop);
+            stack_pop(ctx, 1);
+            if (ctx->stackmap) {
+                stackmap_pop(ctx->stackmap, 1);
+            }
+
+            /* Append value to yield list: list.append(value) */
+            emit_aload(ctx, ctx->yield_list_slot);
+            emit_u8(ctx, OP_SWAP);
+            emit_invokevirtual(ctx, LRT_LIST, "append", "(" DESC_OBJECT ")V");
             stack_pop(ctx, 2);
 
-            /* yield from as an expression evaluates to None (return value not implemented) */
+            codegen_emit_jump(ctx, OP_GOTO, loop_start);
+
+            /* At end_loop: stack has null from NEXT; pop it then push yield-from result (None) */
+            stack_pop(ctx, 1);
+            if (ctx->stackmap) {
+                stackmap_pop(ctx->stackmap, 1);
+            }
+            codegen_mark_label(ctx, end_loop);
+            emit_u8(ctx, OP_POP);
+            stack_pop(ctx, 1);
+            if (ctx->stackmap) {
+                stackmap_pop(ctx->stackmap, 1);
+            }
             emit_py_none(ctx);
             break;
         }
@@ -2733,6 +2993,58 @@ static void codegen_expr(codegen_ctx_t *ctx, ast_node_t *node)
                 /* Stack effect: consumes 1, produces 1 - net zero change */
             } else {
                 emit_py_none(ctx);
+            }
+            break;
+        }
+
+        /* F-string parts: {expr} with optional !r/!s/!a and :format_spec (conversion/format_spec not yet in AST) */
+        case AST_FORMATTED_VALUE: {
+            ast_node_t *value = node->data.await_yield.value;
+            if (value) {
+                codegen_expr(ctx, value);
+                indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache, PY_INDY_STR, NULL, 0);
+                stackmap_track_indy(ctx, PY_INDY_STR);
+            } else {
+                emit_py_str(ctx, "");
+            }
+            break;
+        }
+
+        /* F-string: f"lit{expr}lit" -> JoinedStr(values); values are Constant(str) or FormattedValue */
+        case AST_JOINED_STR: {
+            slist_t *values = node->data.collection.elts;
+            if (!values || !values->data) {
+                emit_py_str(ctx, "");
+                break;
+            }
+            /* First part */
+            ast_node_t *first = values->data;
+            if (first->type == AST_CONSTANT && first->data.constant.kind == TOK_STRING && first->data.constant.value.str_val) {
+                emit_py_str(ctx, first->data.constant.value.str_val);
+            } else if (first->type == AST_FORMATTED_VALUE && first->data.await_yield.value) {
+                codegen_expr(ctx, first->data.await_yield.value);
+                indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache, PY_INDY_STR, NULL, 0);
+                stackmap_track_indy(ctx, PY_INDY_STR);
+            } else {
+                emit_py_str(ctx, "");
+            }
+            /* Remaining parts: result = result + part */
+            for (slist_t *p = values->next; p; p = p->next) {
+                ast_node_t *elt = p->data;
+                if (elt->type == AST_CONSTANT && elt->data.constant.kind == TOK_STRING && elt->data.constant.value.str_val) {
+                    emit_py_str(ctx, elt->data.constant.value.str_val);
+                } else if (elt->type == AST_FORMATTED_VALUE && elt->data.await_yield.value) {
+                    codegen_expr(ctx, elt->data.await_yield.value);
+                    indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache, PY_INDY_STR, NULL, 0);
+                    stackmap_track_indy(ctx, PY_INDY_STR);
+                } else {
+                    emit_py_str(ctx, "");
+                }
+                /* Stack: accum, part - concatenate */
+                indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache, PY_INDY_ADD, NULL, 0);
+                stackmap_track_indy(ctx, PY_INDY_ADD);
+                stack_pop(ctx, 2);
+                stack_push(ctx, 1);
             }
             break;
         }
@@ -2787,6 +3099,43 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
             break;
         }
 
+        /* Annotated assignment: target: annotation = value (annotation ignored at runtime) */
+        case AST_ANN_ASSIGN: {
+            ast_node_t *value = node->data.ann_assign.value;
+            if (!value) break;  /* x: int with no value - no-op */
+            codegen_expr(ctx, value);
+            ast_node_t *target = node->data.ann_assign.target;
+            if (target->type == AST_NAME) {
+                const char *name = target->data.name.id;
+                if (is_global(ctx, name) || ctx->is_module_level) {
+                    emit_ldc_string(ctx, name);
+                    emit_u8(ctx, OP_SWAP);
+                    emit_invokestatic(ctx, "$G", "setGlobal",
+                                      "(Ljava/lang/String;L$O;)V");
+                } else {
+                    int slot = codegen_get_local(ctx, name);
+                    if (slot < 0) slot = codegen_alloc_local(ctx, name);
+                    emit_astore(ctx, slot);
+                }
+            } else if (target->type == AST_SUBSCRIPT) {
+                codegen_expr(ctx, target->data.subscript.value);
+                emit_u8(ctx, OP_SWAP);
+                codegen_expr(ctx, target->data.subscript.slice);
+                emit_u8(ctx, OP_SWAP);
+                indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache, PY_INDY_SETITEM, NULL, 0);
+                stackmap_track_indy(ctx, PY_INDY_SETITEM);
+                stack_pop(ctx, 3);
+            } else if (target->type == AST_ATTRIBUTE) {
+                codegen_expr(ctx, target->data.attribute.value);
+                emit_u8(ctx, OP_SWAP);
+                indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache, PY_INDY_SETATTR,
+                                    target->data.attribute.attr, 0);
+                stackmap_track_indy(ctx, PY_INDY_SETATTR);
+                stack_pop(ctx, 2);
+            }
+            break;
+        }
+
         /* Assignment: target = value */
         case AST_ASSIGN: {
             /* Evaluate the value first */
@@ -2811,12 +3160,8 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                         /* Stack: value */
                         emit_ldc_string(ctx, name);  /* Stack: value, name */
                         emit_u8(ctx, OP_SWAP);       /* Stack: name, value */
-                        emit_invokestatic(ctx, "$G", "setGlobal",
+emit_invokestatic(ctx, "$G", "setGlobal",
                                           "(Ljava/lang/String;L$O;)V");
-                        stack_pop(ctx, 2);  /* setGlobal consumes both */
-                        if (ctx->stackmap) {
-                            stackmap_pop(ctx->stackmap, 2);  /* Pop both from stackmap */
-                        }
 
                         /* Also keep a local copy for faster access at module level */
                         if (ctx->is_module_level && !is_global(ctx, name)) {
@@ -2869,7 +3214,10 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                 if (slot >= 0) {
                     emit_aload(ctx, slot);
                 } else {
-                    emit_aconst_null(ctx);  /* TODO: Global lookup */
+                    /* Global/built-in lookup via $G.builtin(name) */
+                    emit_ldc_string(ctx, name);
+                    emit_invokestatic(ctx, "$G", "builtin",
+                                      "(Ljava/lang/String;)" DESC_OBJECT);
                 }
 
                 codegen_expr(ctx, node->data.aug_assign.value);
@@ -2881,10 +3229,18 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                 stack_pop(ctx, 2);
                 stack_push(ctx, 1);
 
-                if (slot < 0) {
+                if (slot >= 0) {
+                    emit_astore(ctx, slot);
+                } else if (is_global(ctx, name) || ctx->is_module_level) {
+                    /* Store via $G.setGlobal(name, value) */
+                    emit_ldc_string(ctx, name);
+                    emit_u8(ctx, OP_SWAP);
+emit_invokestatic(ctx, "$G", "setGlobal",
+                                          "(Ljava/lang/String;L$O;)V");
+                } else {
                     slot = codegen_alloc_local(ctx, name);
+                    emit_astore(ctx, slot);
                 }
-                emit_astore(ctx, slot);
             }
             break;
         }
@@ -3012,7 +3368,8 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
             break;
         }
 
-        /* For loop */
+        /* For loop (async for: same codegen for now) */
+        case AST_ASYNC_FOR:
         case AST_FOR: {
             label_t *start_label = codegen_new_label(ctx);
             label_t *end_label = codegen_new_label(ctx);      /* Normal exit (iterator exhausted) */
@@ -3036,6 +3393,18 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
             stackmap_state_t *pre_loop_state = NULL;
             if (ctx->stackmap) {
                 pre_loop_state = stackmap_save_state(ctx->stackmap);
+            }
+
+            /* Pre-allocate loop variable slot and init to null so loop-head frame is consistent (first entry vs back-edge) */
+            ast_node_t *for_target = node->data.for_stmt.target;
+            if (for_target->type == AST_NAME && !is_global(ctx, for_target->data.name.id) && !ctx->is_module_level) {
+                const char *name = for_target->data.name.id;
+                int slot = codegen_get_local(ctx, name);
+                if (slot < 0) {
+                    slot = codegen_alloc_local(ctx, for_target->data.name.id);
+                    emit_aconst_null(ctx);
+                    emit_astore(ctx, slot);
+                }
             }
 
             /* Loop start */
@@ -3068,7 +3437,7 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                 post_check_state = stackmap_save_state(ctx->stackmap);
             }
 
-            /* Store loop variable */
+            /* Store loop variable (or unpack into multiple) */
             ast_node_t *target = node->data.for_stmt.target;
             if (target->type == AST_NAME) {
                 const char *name = target->data.name.id;
@@ -3079,12 +3448,8 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                     /* Stack: value */
                     emit_ldc_string(ctx, name);  /* Stack: value, name */
                     emit_u8(ctx, OP_SWAP);       /* Stack: name, value */
-                    emit_invokestatic(ctx, "$G", "setGlobal",
-                                      "(Ljava/lang/String;L$O;)V");
-                    stack_pop(ctx, 2);  /* setGlobal consumes both */
-                    if (ctx->stackmap) {
-                        stackmap_pop(ctx->stackmap, 2);
-                    }
+emit_invokestatic(ctx, "$G", "setGlobal",
+                                          "(Ljava/lang/String;L$O;)V");
                 } else {
                     int slot = codegen_get_local(ctx, name);
                     if (slot < 0) {
@@ -3092,8 +3457,49 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                     }
                     emit_astore(ctx, slot);
                 }
+            } else if (target->type == AST_TUPLE || target->type == AST_LIST) {
+                /* Tuple/list unpacking: for (a, b) in iter - value is on stack */
+                slist_t *elts = target->data.collection.elts;
+                int idx = 0;
+                for (slist_t *e = elts; e; e = e->next, idx++) {
+                    ast_node_t *elt = e->data;
+                    if (elt->type == AST_NAME) {
+                        const char *name = elt->data.name.id;
+                        /* Stack: value (from iterator) */
+                        emit_u8(ctx, OP_DUP);
+                        stack_push(ctx, 1);
+                        if (ctx->stackmap) {
+                            const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                            stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
+                        }
+                        emit_py_int(ctx, (int64_t)idx);
+                        indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache,
+                                            PY_INDY_GETITEM, NULL, 0);
+                        stackmap_track_indy(ctx, PY_INDY_GETITEM);
+                        stack_pop(ctx, 2);
+                        stack_push(ctx, 1);
+                        if (is_global(ctx, name) || ctx->is_module_level) {
+                            emit_ldc_string(ctx, name);
+                            emit_u8(ctx, OP_SWAP);
+emit_invokestatic(ctx, "$G", "setGlobal",
+                                          "(Ljava/lang/String;L$O;)V");
+                        } else {
+                            int slot = codegen_get_local(ctx, name);
+                            if (slot < 0) {
+                                slot = codegen_alloc_local(ctx, name);
+                            }
+                            emit_astore(ctx, slot);
+                        }
+                    }
+                    /* AST_STARRED (*rest) not yet supported - skip */
+                }
+                emit_u8(ctx, OP_POP);  /* Pop the original value */
+                stack_pop(ctx, 1);
+                if (ctx->stackmap) {
+                    stackmap_pop(ctx->stackmap, 1);
+                }
             } else {
-                emit_u8(ctx, OP_POP);  /* TODO: Handle tuple unpacking */
+                emit_u8(ctx, OP_POP);
                 stack_pop(ctx, 1);
                 if (ctx->stackmap) {
                     stackmap_pop(ctx->stackmap, 1);
@@ -3197,6 +3603,8 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
             break;
 
         /* With statement (context manager) */
+        /* With statement (async with: same codegen for now) */
+        case AST_ASYNC_WITH:
         case AST_WITH: {
             slist_t *items = node->data.with_stmt.items;
             slist_t *body = node->data.with_stmt.body;
@@ -3507,14 +3915,12 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                 emit_ldc_string(ctx, module_name);
                 emit_invokestatic(ctx, "$G", "importModule",
                                   "(Ljava/lang/String;)L" LRT_MODULE ";");
-                stack_push(ctx, 1);
 
                 /* Store as global: $G.setGlobal(as_name, module) */
                 emit_ldc_string(ctx, as_name);
                 emit_u8(ctx, OP_SWAP);
                 emit_invokestatic(ctx, "$G", "setGlobal",
                                   "(Ljava/lang/String;L$O;)V");
-                stack_pop(ctx, 2);
             }
             break;
         }
@@ -3543,7 +3949,6 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                 /* Push current package name (null for now - would need __package__) */
                 emit_invokestatic(ctx, "$G", "getCurrentPackage",
                                   "()Ljava/lang/String;");
-                stack_push(ctx, 1);
                 
                 /* Push level */
                 emit_iconst(ctx, level);
@@ -3551,7 +3956,6 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                 /* Call importModule(name, package, level) */
                 emit_invokestatic(ctx, "$G", "importModule",
                                   "(Ljava/lang/String;Ljava/lang/String;I)L" LRT_MODULE ";");
-                stack_pop(ctx, 2);  /* name, package, level -> module */
             } else {
                 /* Absolute import */
                 if (!module_name || strlen(module_name) == 0) {
@@ -3561,7 +3965,6 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                 emit_ldc_string(ctx, module_name);
                 emit_invokestatic(ctx, "$G", "importModule",
                                   "(Ljava/lang/String;)L" LRT_MODULE ";");
-                stack_push(ctx, 1);
             }
 
             /* Now get each name from the module */
@@ -3576,10 +3979,6 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                     /* Stack has: module */
                     emit_invokestatic(ctx, "$G", "importStar",
                                       "(L" LRT_MODULE ";)V");
-                    stack_pop(ctx, 1);
-                    if (ctx->stackmap) {
-                        stackmap_pop(ctx->stackmap, 1);
-                    }
                     
                     /* We consumed the module, so skip the final pop and return */
                     /* No more names to process after * */
@@ -3601,7 +4000,6 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                 emit_u8(ctx, OP_SWAP);
                 emit_invokestatic(ctx, "$G", "setGlobal",
                                   "(Ljava/lang/String;L$O;)V");
-                stack_pop(ctx, 2);
             }
 
             /* Pop the module reference */
@@ -3658,7 +4056,8 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
             codegen_function_def(ctx, node);
             break;
 
-        /* Try/except/finally statement */
+        /* Try/except/finally (try/except*: same codegen; ExceptionGroup not split) */
+        case AST_TRY_STAR:
         case AST_TRY: {
             slist_t *body = node->data.try_stmt.body;
             slist_t *handlers = node->data.try_stmt.handlers;
@@ -3742,11 +4141,6 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                     /* Call exceptionMatches($X, $O) -> boolean */
                     emit_invokestatic(ctx, "$BS", "exceptionMatches",
                                       "(L$X;L$O;)Z");
-                    stack_pop(ctx, 1);  /* 2 args -> 1 boolean */
-                    if (ctx->stackmap) {
-                        stackmap_pop(ctx->stackmap, 2);
-                        /* Boolean result pushed but immediately popped by ifeq */
-                    }
 
                     /* If no match (result == 0), re-raise the exception */
                     label_t *match_label = codegen_new_label(ctx);
@@ -3756,7 +4150,9 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                     emit_u8(ctx, OP_ATHROW);
                     /* Note: stack has 1 $X, but after athrow no fallthrough */
 
-                    /* Match - pop the duplicate and continue */
+                    /* Match - IFNE popped the boolean; at target stack is just $X */
+                    stack_pop(ctx, 1);
+                    if (ctx->stackmap) stackmap_pop(ctx->stackmap, 1);
                     codegen_mark_label(ctx, match_label);
                     /* Record frame: exception on stack after branch merge */
 
@@ -3815,9 +4211,65 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                                         handler_pc, catch_type);
             }
 
-            /* Restore post-try state for after_handlers */
-            if (ctx->stackmap && post_try_state) {
-                stackmap_restore_state(ctx->stackmap, post_try_state);
+            /* If finally present: catch-all handler runs finalbody then rethrows
+             * when an exception is not caught by any except (or there are no excepts).
+             * Frame at handler: pre_try locals + exception on stack. Use java/lang/Throwable
+             * for the stack map because catch_type 0 delivers any Throwable (verifier expects that).
+             * Emit a jump over the catch-all so the previous handler's fall-through does not
+             * land in the catch-all (verifier would merge 0 stack with 1 stack and fail).
+             * Record a frame at the jump so the verifier has a frame for that branch target. */
+            if (finalbody) {
+                if (ctx->stackmap) {
+                    if (post_try_state) {
+                        stackmap_restore_state(ctx->stackmap, post_try_state);
+                        stackmap_set_locals_count(ctx->stackmap, post_try_state->num_locals);
+                    } else if (pre_try_state) {
+                        stackmap_restore_state(ctx->stackmap, pre_try_state);
+                        stackmap_set_locals_count(ctx->stackmap, pre_try_state->num_locals);
+                    }
+                    stackmap_record_frame(ctx->stackmap, (uint16_t)ctx->code->len);
+                }
+                codegen_emit_jump(ctx, OP_GOTO, after_handlers);
+                if (ctx->stackmap && pre_try_state) {
+                    stackmap_restore_state(ctx->stackmap, pre_try_state);
+                    const_pool_t *cp_fin = class_writer_get_cp(ctx->cw);
+                    stackmap_push_object(ctx->stackmap, cp_fin, "java/lang/Throwable");
+                }
+                label_t *catch_all_label = codegen_new_label(ctx);
+                codegen_mark_label(ctx, catch_all_label);
+                uint16_t catch_all_pc = (uint16_t)ctx->code->len;
+
+                stack_push(ctx, 1);
+                int exc_slot = codegen_alloc_local(ctx, "$exc_finally");
+                emit_astore(ctx, exc_slot);
+
+                codegen_stmts(ctx, finalbody);
+
+                emit_aload(ctx, exc_slot);
+                emit_u8(ctx, OP_ATHROW);
+                stack_pop(ctx, 1);
+                if (ctx->stackmap) {
+                    stackmap_pop(ctx->stackmap, 1);
+                }
+
+                /* catch_type 0 = catch all (any Throwable); must be after typed handlers in table */
+                code_attr_add_exception(ctx->code_attr, try_start_pc, try_end_pc,
+                                        catch_all_pc, 0);
+            }
+
+            /* Restore state for after_handlers so the frame matches all incoming paths.
+             * Use post_try_state when body falls through; otherwise use pre_try_state
+             * so we don't leave the catch-all's extra locals in the frame.
+             * stackmap_restore_state does not shrink locals_count, so force it so the
+             * recorded frame has the correct number of locals. */
+            if (ctx->stackmap) {
+                if (post_try_state) {
+                    stackmap_restore_state(ctx->stackmap, post_try_state);
+                    stackmap_set_locals_count(ctx->stackmap, post_try_state->num_locals);
+                } else if (pre_try_state) {
+                    stackmap_restore_state(ctx->stackmap, pre_try_state);
+                    stackmap_set_locals_count(ctx->stackmap, pre_try_state->num_locals);
+                }
             }
 
             /* Mark after handlers */
@@ -3832,10 +4284,8 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                 codegen_stmts(ctx, orelse);
             }
 
-            /* Generate finally block if present */
+            /* Generate finally block if present (normal path; exception path uses catch-all above) */
             if (finalbody) {
-                /* For now, just generate the finally code inline
-                 * A proper implementation would also run finally on exception */
                 codegen_stmts(ctx, finalbody);
             }
 
@@ -3856,30 +4306,14 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                     codegen_expr(ctx, cause);
                     emit_invokestatic(ctx, "$BS", "raiseExceptionFrom",
                                       "(L$O;L$O;)L$X;");
-                    stack_pop(ctx, 1);  /* Two args -> one result */
-                    if (ctx->stackmap) {
-                        const_pool_t *cp = class_writer_get_cp(ctx->cw);
-                        stackmap_pop(ctx->stackmap, 2);
-                        stackmap_push_object(ctx->stackmap, cp, "$X");
-                    }
                 } else {
                     /* raise exc - call raiseException helper */
                     emit_invokestatic(ctx, "$BS", "raiseException",
                                       "(L$O;)L$X;");
-                    /* Stack: $O -> $X */
-                    if (ctx->stackmap) {
-                        const_pool_t *cp = class_writer_get_cp(ctx->cw);
-                        stackmap_pop(ctx->stackmap, 1);
-                        stackmap_push_object(ctx->stackmap, cp, "$X");
-                    }
                 }
 
                 /* Throw the returned exception */
                 emit_u8(ctx, OP_ATHROW);
-                stack_pop(ctx, 1);
-                if (ctx->stackmap) {
-                    stackmap_pop(ctx->stackmap, 1);
-                }
             } else {
                 /* Bare raise - re-raise current exception */
                 /* This requires exception context which we don't track yet */
@@ -3979,14 +4413,19 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                 ast_node_t *target = t->data;
 
                 if (target->type == AST_NAME) {
-                    /* del x - set local to null (Python semantics: unbind name) */
+                    /* del x - unbind name (local: set to null; global: remove from globals) */
                     const char *name = target->data.name.id;
                     int slot = codegen_get_local(ctx, name);
                     if (slot >= 0) {
                         emit_aconst_null(ctx);
                         emit_astore(ctx, slot);
+                    } else if (is_global(ctx, name) || ctx->is_module_level) {
+                        /* Delete from global namespace via $G.delGlobal(name) */
+                        emit_ldc_string(ctx, name);
+                        emit_invokestatic(ctx, "$G", "delGlobal",
+                                          "(Ljava/lang/String;)V");
                     }
-                    /* If not a local, it would be a global - not yet supported */
+                    /* If not local and not global, del at runtime would raise NameError */
                 } else if (target->type == AST_SUBSCRIPT) {
                     /* del d[key] - call __delitem__ */
                     codegen_expr(ctx, target->data.subscript.value);  /* container */
@@ -4026,7 +4465,6 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                 emit_ldc_string(ctx, class_name);
                 emit_invokestatic(ctx, LRT_CLASS, "of",
                                   "(Ljava/lang/String;)L" LRT_CLASS ";");
-                stack_push(ctx, 1);
             } else {
                 /* With bases - need to create array */
                 emit_ldc_string(ctx, class_name);
@@ -4049,8 +4487,6 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                 /* Call $Cls.of(String, $O[]) */
                 emit_invokestatic(ctx, LRT_CLASS, "of",
                                   "(Ljava/lang/String;[L$O;)L" LRT_CLASS ";");
-                stack_pop(ctx, 2);
-                stack_push(ctx, 1);
             }
 
             /* Stack: $Cls */
@@ -4063,7 +4499,7 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
             for (slist_t *s = body; s; s = s->next) {
                 ast_node_t *stmt = s->data;
 
-                if (stmt->type == AST_FUNCTION_DEF) {
+                if (stmt->type == AST_FUNCTION_DEF || stmt->type == AST_ASYNC_FUNCTION_DEF) {
                     /* Compile the method */
                     const char *method_name = stmt->data.func_def.name;
 
@@ -4081,6 +4517,21 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                     emit_invokevirtual(ctx, LRT_CLASS, "setAttr",
                                        "(Ljava/lang/String;L$O;)V");
                     stack_pop(ctx, 3);  /* class + name + value consumed */
+                    if (ctx->stackmap) {
+                        stackmap_pop(ctx->stackmap, 3);
+                    }
+                } else if (stmt->type == AST_CLASS_DEF) {
+                    /* Nested class: compile (stores in local), then set as attribute on current class */
+                    const char *inner_name = stmt->data.class_def.name;
+                    codegen_stmt(ctx, stmt);
+                    emit_aload(ctx, class_slot);
+                    int inner_slot = codegen_get_local(ctx, inner_name);
+                    emit_aload(ctx, inner_slot);
+                    emit_ldc_string(ctx, inner_name);
+                    emit_u8(ctx, OP_SWAP);
+                    emit_invokevirtual(ctx, LRT_CLASS, "setAttr",
+                                       "(Ljava/lang/String;L$O;)V");
+                    stack_pop(ctx, 3);
                     if (ctx->stackmap) {
                         stackmap_pop(ctx->stackmap, 3);
                     }
@@ -4157,8 +4608,10 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                     codegen_expr(ctx, stmt->data.expr_stmt.value);
                     emit_u8(ctx, OP_POP);
                     stack_pop(ctx, 1);
+                } else {
+                    /* Other statements (if, with, try, etc.) execute at class definition time */
+                    codegen_stmt(ctx, stmt);
                 }
-                /* Other statement types in class body not yet supported */
             }
 
             /* Load the class back and store */
@@ -4170,10 +4623,6 @@ static void codegen_stmt(codegen_ctx_t *ctx, ast_node_t *node)
                 emit_u8(ctx, OP_SWAP);
                 emit_invokestatic(ctx, "$G", "setGlobal",
                                   "(Ljava/lang/String;L$O;)V");
-                stack_pop(ctx, 2);
-                if (ctx->stackmap) {
-                    stackmap_pop(ctx->stackmap, 2);
-                }
             } else {
                 int final_slot = codegen_get_local(ctx, class_name);
                 if (final_slot < 0) {
@@ -4446,11 +4895,6 @@ static void codegen_match_pattern(codegen_ctx_t *ctx, ast_node_t *pattern,
             /* Build: len(subject) == num_patterns */
             emit_ldc_string(ctx, "len");
             emit_invokestatic(ctx, "$G", "builtin", "(Ljava/lang/String;)L$O;");
-            stack_push(ctx, 1);
-            if (ctx->stackmap) {
-                const_pool_t *cp = class_writer_get_cp(ctx->cw);
-                stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
-            }
             
             /* Create args array with subject */
             emit_iconst(ctx, 1);
@@ -4522,7 +4966,7 @@ static void codegen_match_pattern(codegen_ctx_t *ctx, ast_node_t *pattern,
             break;
         }
         
-        /* Class pattern: ClassName(x, y) */
+        /* Class pattern: ClassName(x, y) - isinstance then __match_args__ positional */
         case AST_MATCH_CLASS: {
             ast_node_t *cls = pattern->data.pattern.value;
             slist_t *patterns = pattern->data.pattern.patterns;
@@ -4539,11 +4983,6 @@ static void codegen_match_pattern(codegen_ctx_t *ctx, ast_node_t *pattern,
             
             /* Call isinstance */
             emit_invokestatic(ctx, "$BS", "isinstance", "(L$O;L$O;)Z");
-            stack_pop(ctx, 1);
-            if (ctx->stackmap) {
-                stackmap_pop(ctx->stackmap, 2);
-                stackmap_push_int(ctx->stackmap);
-            }
             
             codegen_emit_jump(ctx, OP_IFEQ, fail_label);
             stack_pop(ctx, 1);
@@ -4551,9 +4990,109 @@ static void codegen_match_pattern(codegen_ctx_t *ctx, ast_node_t *pattern,
                 stackmap_pop(ctx->stackmap, 1);
             }
             
-            /* TODO: Match positional arguments via __match_args__ */
-            /* For now, just check isinstance */
-            (void)patterns;
+            /* Match positional sub-patterns via cls.__match_args__ */
+            if (patterns && patterns->data) {
+                int cls_slot = codegen_alloc_local(ctx, "$match_cls");
+                codegen_expr(ctx, cls);
+                emit_astore(ctx, cls_slot);
+                
+                /* Get __match_args__ = getattr(cls, "__match_args__") */
+                emit_aload(ctx, cls_slot);
+                emit_py_str(ctx, "__match_args__");
+                /* Stack: [cls, attr_name]; build args array and call getattr */
+                emit_iconst(ctx, 2);
+                emit_anewarray(ctx, LRT_OBJECT);
+                emit_u8(ctx, OP_DUP);
+                stack_push(ctx, 1);
+                if (ctx->stackmap) {
+                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                    stackmap_push_object(ctx->stackmap, cp, "[L$O;");
+                }
+                emit_iconst(ctx, 0);
+                emit_aload(ctx, cls_slot);
+                emit_u8(ctx, OP_AASTORE);
+                stack_pop(ctx, 3);
+                if (ctx->stackmap) stackmap_pop(ctx->stackmap, 3);
+                emit_u8(ctx, OP_DUP);
+                stack_push(ctx, 1);
+                if (ctx->stackmap) {
+                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                    stackmap_push_object(ctx->stackmap, cp, "[L$O;");
+                }
+                emit_iconst(ctx, 1);
+                emit_ldc_string(ctx, "__match_args__");
+                emit_invokestatic(ctx, LRT_STR, "of", "(Ljava/lang/String;)" DESC_STR);
+                emit_u8(ctx, OP_AASTORE);
+                stack_pop(ctx, 3);
+                if (ctx->stackmap) stackmap_pop(ctx->stackmap, 3);
+                emit_ldc_string(ctx, "getattr");
+                emit_invokestatic(ctx, "$G", "builtin", "(Ljava/lang/String;)L$O;");
+                emit_u8(ctx, OP_SWAP);
+                indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache, PY_INDY_CALL, NULL, 1);
+                stackmap_track_indy(ctx, PY_INDY_CALL);
+                stack_pop(ctx, 2);
+                stack_push(ctx, 1);
+                int match_args_slot = codegen_alloc_local(ctx, "$match_args");
+                emit_astore(ctx, match_args_slot);
+                
+                int idx = 0;
+                int subj_tmp = codegen_alloc_local(ctx, "$getattr_obj");
+                int attr_tmp = codegen_alloc_local(ctx, "$getattr_attr");
+                for (slist_t *p = patterns; p; p = p->next, idx++) {
+                    ast_node_t *elem_pat = p->data;
+                    /* Get attr name: match_args[idx] */
+                    emit_aload(ctx, match_args_slot);
+                    stack_push(ctx, 1);
+                    if (ctx->stackmap) {
+                        const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                        stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
+                    }
+                    emit_py_int(ctx, (int64_t)idx);
+                    indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache,
+                                        PY_INDY_GETITEM, NULL, 0);
+                    stackmap_track_indy(ctx, PY_INDY_GETITEM);
+                    stack_pop(ctx, 2);
+                    stack_push(ctx, 1);
+                    /* value = getattr(subject, attr_name); build args via temps */
+                    emit_aload(ctx, subject_slot);
+                    emit_astore(ctx, subj_tmp);
+                    emit_astore(ctx, attr_tmp);
+                    emit_iconst(ctx, 2);
+                    emit_anewarray(ctx, LRT_OBJECT);
+                    emit_u8(ctx, OP_DUP);
+                    stack_push(ctx, 1);
+                    if (ctx->stackmap) {
+                        const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                        stackmap_push_object(ctx->stackmap, cp, "[L$O;");
+                    }
+                    emit_iconst(ctx, 0);
+                    emit_aload(ctx, subj_tmp);
+                    emit_u8(ctx, OP_AASTORE);
+                    stack_pop(ctx, 3);
+                    if (ctx->stackmap) stackmap_pop(ctx->stackmap, 3);
+                    emit_u8(ctx, OP_DUP);
+                    stack_push(ctx, 1);
+                    if (ctx->stackmap) {
+                        const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                        stackmap_push_object(ctx->stackmap, cp, "[L$O;");
+                    }
+                    emit_iconst(ctx, 1);
+                    emit_aload(ctx, attr_tmp);
+                    emit_u8(ctx, OP_AASTORE);
+                    stack_pop(ctx, 3);
+                    if (ctx->stackmap) stackmap_pop(ctx->stackmap, 3);
+                    emit_ldc_string(ctx, "getattr");
+                    emit_invokestatic(ctx, "$G", "builtin", "(Ljava/lang/String;)L$O;");
+                    emit_u8(ctx, OP_SWAP);
+                    indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache, PY_INDY_CALL, NULL, 1);
+                    stackmap_track_indy(ctx, PY_INDY_CALL);
+                    stack_pop(ctx, 2);
+                    stack_push(ctx, 1);
+                    int elem_slot = codegen_alloc_local(ctx, "$match_elem");
+                    emit_astore(ctx, elem_slot);
+                    codegen_match_pattern(ctx, elem_pat, elem_slot, fail_label);
+                }
+            }
             break;
         }
         
@@ -4562,10 +5101,57 @@ static void codegen_match_pattern(codegen_ctx_t *ctx, ast_node_t *pattern,
             /* Handled in sequence pattern */
             break;
         
-        /* Mapping pattern: {key: pattern, ...} */
-        case AST_MATCH_MAPPING:
-            /* TODO: Implement mapping pattern matching */
+        /* Mapping pattern: {key: pattern, ...} - key must be in subject, then value matches pattern */
+        case AST_MATCH_MAPPING: {
+            slist_t *keys = pattern->data.mapping_match.keys;
+            slist_t *patterns = pattern->data.mapping_match.patterns;
+            if (!keys || !patterns) {
+                codegen_emit_jump(ctx, OP_GOTO, fail_label);
+                break;
+            }
+            slist_t *k = keys;
+            slist_t *p = patterns;
+            for (; k && p; k = k->next, p = p->next) {
+                ast_node_t *key_expr = k->data;
+                ast_node_t *value_pat = p->data;
+                /* Check key in subject */
+                emit_aload(ctx, subject_slot);
+                stack_push(ctx, 1);
+                if (ctx->stackmap) {
+                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                    stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
+                }
+                codegen_expr(ctx, key_expr);
+                indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache,
+                                    PY_INDY_CONTAINS, NULL, 0);
+                stackmap_track_indy(ctx, PY_INDY_CONTAINS);
+                stack_pop(ctx, 2);
+                stack_push(ctx, 1);
+                indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache,
+                                    PY_INDY_BOOL, NULL, 0);
+                stackmap_track_indy(ctx, PY_INDY_BOOL);
+                codegen_emit_jump(ctx, OP_IFEQ, fail_label);
+                stack_pop(ctx, 1);
+                if (ctx->stackmap) stackmap_pop(ctx->stackmap, 1);
+                /* Get subject[key] and match value pattern */
+                emit_aload(ctx, subject_slot);
+                stack_push(ctx, 1);
+                if (ctx->stackmap) {
+                    const_pool_t *cp = class_writer_get_cp(ctx->cw);
+                    stackmap_push_object(ctx->stackmap, cp, LRT_OBJECT);
+                }
+                codegen_expr(ctx, key_expr);
+                indy_emit_operation(ctx->cw, ctx->code, ctx->indy_cache,
+                                    PY_INDY_GETITEM, NULL, 0);
+                stackmap_track_indy(ctx, PY_INDY_GETITEM);
+                stack_pop(ctx, 2);
+                stack_push(ctx, 1);
+                int elem_slot = codegen_alloc_local(ctx, "$match_elem");
+                emit_astore(ctx, elem_slot);
+                codegen_match_pattern(ctx, value_pat, elem_slot, fail_label);
+            }
             break;
+        }
         
         default:
             break;
@@ -5138,25 +5724,12 @@ static void codegen_function_def(codegen_ctx_t *ctx, ast_node_t *node)
         /* Call $MH.withClosure(MethodHandle, $O[]) -> $MH */
         emit_invokestatic(ctx, "$MH", "withClosure",
                           "(Ljava/lang/invoke/MethodHandle;[L$O;)L$MH;");
-        stack_pop(ctx, 2);
-        stack_push(ctx, 1);
-        if (ctx->stackmap) {
-            const_pool_t *cp = class_writer_get_cp(ctx->cw);
-            stackmap_pop(ctx->stackmap, 2);
-            stackmap_push_object(ctx->stackmap, cp, "$MH");
-        }
 
         slist_free(captured_vars);
     } else {
         /* No closure - wrap in $MH directly */
         emit_invokestatic(ctx, "$MH", "of",
                           "(Ljava/lang/invoke/MethodHandle;)L$MH;");
-        /* Stack: MH -> $MH (no change in count, but type changes) */
-        if (ctx->stackmap) {
-            const_pool_t *cp = class_writer_get_cp(ctx->cw);
-            stackmap_pop(ctx->stackmap, 1);
-            stackmap_push_object(ctx->stackmap, cp, "$MH");
-        }
     }
 
     /* Apply decorators (in reverse order - innermost first) */
@@ -5234,12 +5807,8 @@ static void codegen_function_def(codegen_ctx_t *ctx, ast_node_t *node)
         /* Stack: $MH */
         emit_ldc_string(ctx, func_name);  /* Stack: $MH, name */
         emit_u8(ctx, OP_SWAP);             /* Stack: name, $MH */
-        emit_invokestatic(ctx, "$G", "setGlobal",
-                          "(Ljava/lang/String;L$O;)V");
-        stack_pop(ctx, 2);
-        if (ctx->stackmap) {
-            stackmap_pop(ctx->stackmap, 2);  /* Pop String + $MH from stackmap */
-        }
+emit_invokestatic(ctx, "$G", "setGlobal",
+                                          "(Ljava/lang/String;L$O;)V");
     } else {
         int func_slot = codegen_get_local(ctx, func_name);
         if (func_slot < 0) {
@@ -5458,24 +6027,12 @@ static void codegen_lambda(codegen_ctx_t *ctx, ast_node_t *node)
 
         emit_invokestatic(ctx, "$MH", "withClosure",
                           "(Ljava/lang/invoke/MethodHandle;[L$O;)L$MH;");
-        stack_pop(ctx, 2);
-        stack_push(ctx, 1);
-        /* Update stackmap: pop MH + array, push $MH */
-        if (ctx->stackmap) {
-            stackmap_pop(ctx->stackmap, 2);
-            stackmap_push_object(ctx->stackmap, cp, "$MH");
-        }
 
         slist_free(captured_vars);
     } else {
         /* No closure - wrap in $MH */
         emit_invokestatic(ctx, "$MH", "of",
                           "(Ljava/lang/invoke/MethodHandle;)L$MH;");
-        /* Update stackmap: pop MH, push $MH */
-        if (ctx->stackmap) {
-            stackmap_pop(ctx->stackmap, 1);
-            stackmap_push_object(ctx->stackmap, cp, "$MH");
-        }
     }
 
     /* Lambda leaves $MH on the stack (it's an expression) */

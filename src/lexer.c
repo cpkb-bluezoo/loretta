@@ -470,7 +470,7 @@ finish_number:
     }
 }
 
-static void lexer_scan_string(lexer_t *lexer, bool is_bytes, bool is_fstring)
+static void lexer_scan_string(lexer_t *lexer, bool is_bytes, bool is_fstring, bool is_raw)
 {
     int start_line = lexer->line;
     int start_column = lexer->column;
@@ -517,23 +517,39 @@ static void lexer_scan_string(lexer_t *lexer, bool is_bytes, bool is_fstring)
                 break;
             }
             c = lexer_peek(lexer);
-            char esc;
-            switch (c) {
-                case 'n':  esc = '\n'; break;
-                case 't':  esc = '\t'; break;
-                case 'r':  esc = '\r'; break;
-                case '\\': esc = '\\'; break;
-                case '\'': esc = '\''; break;
-                case '"':  esc = '"'; break;
-                case '0':  esc = '\0'; break;
-                case '\n':
-                    /* Line continuation */
-                    lexer_advance_char(lexer);
-                    continue;
-                default:   esc = c; break;
-            }
-            if (buf_pos < sizeof(lexer->text_buf) - 1) {
-                lexer->text_buf[buf_pos++] = esc;
+            if (is_raw) {
+                /* Raw string: backslash only escapes the closing quote (so it's not stored) */
+                if (c != quote) {
+                    if (buf_pos < sizeof(lexer->text_buf) - 1) {
+                        lexer->text_buf[buf_pos++] = '\\';
+                    }
+                    if (buf_pos < sizeof(lexer->text_buf) - 1) {
+                        lexer->text_buf[buf_pos++] = c;
+                    }
+                } else {
+                    if (buf_pos < sizeof(lexer->text_buf) - 1) {
+                        lexer->text_buf[buf_pos++] = '\\';
+                    }
+                }
+            } else {
+                char esc;
+                switch (c) {
+                    case 'n':  esc = '\n'; break;
+                    case 't':  esc = '\t'; break;
+                    case 'r':  esc = '\r'; break;
+                    case '\\': esc = '\\'; break;
+                    case '\'': esc = '\''; break;
+                    case '"':  esc = '"'; break;
+                    case '0':  esc = '\0'; break;
+                    case '\n':
+                        /* Line continuation */
+                        lexer_advance_char(lexer);
+                        continue;
+                    default:   esc = c; break;
+                }
+                if (buf_pos < sizeof(lexer->text_buf) - 1) {
+                    lexer->text_buf[buf_pos++] = esc;
+                }
             }
         } else {
             if (buf_pos < sizeof(lexer->text_buf) - 1) {
@@ -780,7 +796,6 @@ void lexer_advance(lexer_t *lexer)
         } else if ((c == 'r' || c == 'R') &&
             (lexer_peek_ahead(lexer, 1) == '\'' || lexer_peek_ahead(lexer, 1) == '"')) {
             is_raw = true;
-            (void)is_raw;  /* TODO: handle raw strings */
             lexer_advance_char(lexer);
         } else if ((c == 'f' || c == 'F') &&
             (lexer_peek_ahead(lexer, 1) == '\'' || lexer_peek_ahead(lexer, 1) == '"')) {
@@ -790,7 +805,7 @@ void lexer_advance(lexer_t *lexer)
 
         c = lexer_peek(lexer);
         if (c == '\'' || c == '"') {
-            lexer_scan_string(lexer, is_bytes, is_fstring);
+            lexer_scan_string(lexer, is_bytes, is_fstring, is_raw);
             return;
         }
 
@@ -806,7 +821,7 @@ void lexer_advance(lexer_t *lexer)
 
     /* Strings */
     if (c == '\'' || c == '"') {
-        lexer_scan_string(lexer, false, false);
+        lexer_scan_string(lexer, false, false, false);
         return;
     }
 

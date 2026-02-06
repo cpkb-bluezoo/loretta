@@ -18,6 +18,12 @@ print("x =", x)
 del x
 # Note: accessing x after del would raise NameError
 
+# del global variable
+global_var = 100
+print("global_var =", global_var)
+del global_var
+print("del global OK (global_var removed from globals)")
+
 # del instance attribute
 class Obj:
     def __init__(self):

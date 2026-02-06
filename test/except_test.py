@@ -101,4 +101,13 @@ try:
 except ValueError:
     print("Caught chained ValueError")
 
+# Test try/finally - finally runs on normal path
+print("\nTest 14: try/finally (normal path)")
+finally_ran = False
+try:
+    z = 1 + 1
+finally:
+    finally_ran = True
+    print("Finally ran (normal):", finally_ran)
+
 print("\nDone!")

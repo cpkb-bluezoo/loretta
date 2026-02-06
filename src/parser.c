@@ -81,7 +81,246 @@ void ast_free(ast_node_t *node)
             free(node->data.attribute.attr);
             break;
 
-        /* TODO: Add free logic for other node types */
+        case AST_RETURN:
+            ast_free(node->data.return_stmt.value);
+            break;
+
+        case AST_DELETE:
+            slist_free_full(node->data.delete_stmt.targets, (void (*)(void *))ast_free);
+            break;
+
+        case AST_ASSIGN:
+            slist_free_full(node->data.assign.targets, (void (*)(void *))ast_free);
+            ast_free(node->data.assign.value);
+            break;
+
+        case AST_AUG_ASSIGN:
+            ast_free(node->data.aug_assign.target);
+            ast_free(node->data.aug_assign.value);
+            break;
+
+        case AST_ANN_ASSIGN:
+            ast_free(node->data.ann_assign.target);
+            ast_free(node->data.ann_assign.annotation);
+            ast_free(node->data.ann_assign.value);
+            break;
+
+        case AST_FOR:
+        case AST_ASYNC_FOR:
+            ast_free(node->data.for_stmt.target);
+            ast_free(node->data.for_stmt.iter);
+            slist_free_full(node->data.for_stmt.body, (void (*)(void *))ast_free);
+            slist_free_full(node->data.for_stmt.orelse, (void (*)(void *))ast_free);
+            break;
+
+        case AST_WHILE:
+            ast_free(node->data.while_stmt.test);
+            slist_free_full(node->data.while_stmt.body, (void (*)(void *))ast_free);
+            slist_free_full(node->data.while_stmt.orelse, (void (*)(void *))ast_free);
+            break;
+
+        case AST_IF:
+            ast_free(node->data.if_stmt.test);
+            slist_free_full(node->data.if_stmt.body, (void (*)(void *))ast_free);
+            slist_free_full(node->data.if_stmt.orelse, (void (*)(void *))ast_free);
+            break;
+
+        case AST_WITH:
+        case AST_ASYNC_WITH:
+            slist_free_full(node->data.with_stmt.items, (void (*)(void *))ast_free);
+            slist_free_full(node->data.with_stmt.body, (void (*)(void *))ast_free);
+            break;
+
+        case AST_RAISE:
+            ast_free(node->data.raise_stmt.exc);
+            ast_free(node->data.raise_stmt.cause);
+            break;
+
+        case AST_TRY:
+        case AST_TRY_STAR:
+            slist_free_full(node->data.try_stmt.body, (void (*)(void *))ast_free);
+            slist_free_full(node->data.try_stmt.handlers, (void (*)(void *))ast_free);
+            slist_free_full(node->data.try_stmt.orelse, (void (*)(void *))ast_free);
+            slist_free_full(node->data.try_stmt.finalbody, (void (*)(void *))ast_free);
+            break;
+
+        case AST_ASSERT:
+            ast_free(node->data.assert_stmt.test);
+            ast_free(node->data.assert_stmt.msg);
+            break;
+
+        case AST_IMPORT:
+            slist_free_full(node->data.import_stmt.names, (void (*)(void *))ast_free);
+            break;
+
+        case AST_IMPORT_FROM:
+            free(node->data.import_from.module);
+            slist_free_full(node->data.import_from.names, (void (*)(void *))ast_free);
+            break;
+
+        case AST_GLOBAL:
+        case AST_NONLOCAL:
+            slist_free_full(node->data.global_stmt.names, free);
+            break;
+
+        case AST_EXPR_STMT:
+            ast_free(node->data.expr_stmt.value);
+            break;
+
+        case AST_BOOL_OP:
+            slist_free_full(node->data.bool_op.values, (void (*)(void *))ast_free);
+            break;
+
+        case AST_NAMED_EXPR:
+            ast_free(node->data.named_expr.target);
+            ast_free(node->data.named_expr.value);
+            break;
+
+        case AST_BIN_OP:
+            ast_free(node->data.bin_op.left);
+            ast_free(node->data.bin_op.right);
+            break;
+
+        case AST_UNARY_OP:
+            ast_free(node->data.unary_op.operand);
+            break;
+
+        case AST_LAMBDA:
+            ast_free(node->data.lambda.args);
+            ast_free(node->data.lambda.body);
+            break;
+
+        case AST_IF_EXP:
+            ast_free(node->data.if_exp.test);
+            ast_free(node->data.if_exp.body);
+            ast_free(node->data.if_exp.orelse);
+            break;
+
+        case AST_DICT:
+            slist_free_full(node->data.dict.keys, (void (*)(void *))ast_free);
+            slist_free_full(node->data.dict.values, (void (*)(void *))ast_free);
+            break;
+
+        case AST_SET:
+        case AST_LIST:
+        case AST_TUPLE:
+            slist_free_full(node->data.collection.elts, (void (*)(void *))ast_free);
+            break;
+
+        case AST_LIST_COMP:
+        case AST_SET_COMP:
+        case AST_GENERATOR_EXP:
+            ast_free(node->data.comprehension_expr.elt);
+            slist_free_full(node->data.comprehension_expr.generators, (void (*)(void *))ast_free);
+            break;
+
+        case AST_DICT_COMP:
+            ast_free(node->data.dict_comp.key);
+            ast_free(node->data.dict_comp.value);
+            slist_free_full(node->data.dict_comp.generators, (void (*)(void *))ast_free);
+            break;
+
+        case AST_AWAIT:
+        case AST_YIELD:
+        case AST_YIELD_FROM:
+            ast_free(node->data.await_yield.value);
+            break;
+
+        case AST_COMPARE:
+            ast_free(node->data.compare.left);
+            slist_free_full(node->data.compare.comparators, (void (*)(void *))ast_free);
+            break;
+
+        case AST_CALL:
+            ast_free(node->data.call.func);
+            slist_free_full(node->data.call.args, (void (*)(void *))ast_free);
+            slist_free_full(node->data.call.keywords, (void (*)(void *))ast_free);
+            break;
+
+        case AST_SUBSCRIPT:
+            ast_free(node->data.subscript.value);
+            ast_free(node->data.subscript.slice);
+            break;
+
+        case AST_STARRED:
+            ast_free(node->data.starred.value);
+            break;
+
+        case AST_SLICE:
+            ast_free(node->data.slice.lower);
+            ast_free(node->data.slice.upper);
+            ast_free(node->data.slice.step);
+            break;
+
+        case AST_COMPREHENSION:
+            ast_free(node->data.comprehension.target);
+            ast_free(node->data.comprehension.iter);
+            slist_free_full(node->data.comprehension.ifs, (void (*)(void *))ast_free);
+            break;
+
+        case AST_EXCEPT_HANDLER:
+            ast_free(node->data.except_handler.type);
+            free(node->data.except_handler.name);
+            slist_free_full(node->data.except_handler.body, (void (*)(void *))ast_free);
+            break;
+
+        case AST_ARGUMENTS:
+            slist_free_full(node->data.arguments.posonlyargs, (void (*)(void *))ast_free);
+            slist_free_full(node->data.arguments.args, (void (*)(void *))ast_free);
+            ast_free(node->data.arguments.vararg);
+            slist_free_full(node->data.arguments.kwonlyargs, (void (*)(void *))ast_free);
+            slist_free_full(node->data.arguments.kw_defaults, (void (*)(void *))ast_free);
+            ast_free(node->data.arguments.kwarg);
+            slist_free_full(node->data.arguments.defaults, (void (*)(void *))ast_free);
+            break;
+
+        case AST_ARG:
+            free(node->data.arg.arg);
+            ast_free(node->data.arg.annotation);
+            break;
+
+        case AST_KEYWORD:
+            free(node->data.keyword.arg);
+            ast_free(node->data.keyword.value);
+            break;
+
+        case AST_ALIAS:
+            free(node->data.alias.name);
+            free(node->data.alias.asname);
+            break;
+
+        case AST_WITH_ITEM:
+            ast_free(node->data.with_item.context_expr);
+            ast_free(node->data.with_item.optional_vars);
+            break;
+
+        case AST_MATCH:
+            ast_free(node->data.match_stmt.subject);
+            slist_free_full(node->data.match_stmt.cases, (void (*)(void *))ast_free);
+            break;
+
+        case AST_MATCH_CASE:
+            ast_free(node->data.match_case.pattern);
+            ast_free(node->data.match_case.guard);
+            slist_free_full(node->data.match_case.body, (void (*)(void *))ast_free);
+            break;
+
+        case AST_MATCH_VALUE:
+        case AST_MATCH_SINGLETON:
+        case AST_MATCH_AS:
+        case AST_MATCH_OR:
+        case AST_MATCH_SEQUENCE:
+        case AST_MATCH_CLASS:
+        case AST_MATCH_STAR:
+            ast_free(node->data.pattern.value);
+            free(node->data.pattern.name);
+            slist_free_full(node->data.pattern.patterns, (void (*)(void *))ast_free);
+            break;
+
+        case AST_MATCH_MAPPING:
+            slist_free_full(node->data.mapping_match.keys, (void (*)(void *))ast_free);
+            slist_free_full(node->data.mapping_match.patterns, (void (*)(void *))ast_free);
+            break;
 
         default:
             break;
@@ -2181,14 +2420,15 @@ static ast_node_t *parse_pattern_atom(parser_t *parser)
         case TOK_LBRACE: {
             lexer_advance(parser->lexer);
             ast_node_t *node = ast_new(AST_MATCH_MAPPING, line, column);
-            node->data.pattern.patterns = NULL;  /* TODO: Store key-pattern pairs properly */
+            node->data.mapping_match.keys = NULL;
+            node->data.mapping_match.patterns = NULL;
 
             while (!parser_check(parser, TOK_RBRACE) && !parser->error_msg) {
-                /* For now, just skip the mapping content - simplified */
-                parse_expression(parser);  /* key */
+                ast_node_t *key = parse_expression(parser);
                 parser_expect(parser, TOK_COLON);
-                parse_pattern(parser);  /* pattern */
-
+                ast_node_t *pat = parse_pattern(parser);
+                node->data.mapping_match.keys = slist_append(node->data.mapping_match.keys, key);
+                node->data.mapping_match.patterns = slist_append(node->data.mapping_match.patterns, pat);
                 if (!parser_match(parser, TOK_COMMA)) {
                     break;
                 }

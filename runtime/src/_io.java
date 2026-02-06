@@ -147,8 +147,24 @@ public class _io {
         public abstract $O readall();
         public abstract $I write($O data);
         
+        /**
+         * Read bytes into a writable buffer (bytearray). Returns number of bytes read,
+         * or 0 at EOF. Override in subclasses to read directly into buffer when possible.
+         */
         public $O readinto($O buffer) {
-            throw new $X.NotImplementedError("readinto not implemented");
+            checkReadable();
+            if (!(buffer instanceof $BY)) {
+                throw new $X.TypeError("readinto() argument must be a bytes-like object, not "
+                    + (buffer != null ? buffer.getClass().getSimpleName() : "NoneType"));
+            }
+            byte[] dest = (($BY) buffer).data;
+            if (dest.length == 0) return $I.of(0);
+            $O chunk = read($I.of(dest.length));
+            if (!(chunk instanceof $BY)) return $I.of(0);
+            byte[] src = (($BY) chunk).data;
+            int n = src.length;
+            if (n > 0) System.arraycopy(src, 0, dest, 0, n);
+            return $I.of(n);
         }
         
         @Override
@@ -191,6 +207,24 @@ public class _io {
         public abstract $O read1($O size);
         public abstract $I write($O data);
         
+        /** Read bytes into a writable buffer; uses read() and copies. */
+        public $O readinto($O buffer) {
+            checkClosed();
+            if (!readable().__bool__()) throw new $X.OSError("not readable");
+            if (!(buffer instanceof $BY)) {
+                throw new $X.TypeError("readinto() argument must be a bytes-like object, not "
+                    + (buffer != null ? buffer.getClass().getSimpleName() : "NoneType"));
+            }
+            byte[] dest = (($BY) buffer).data;
+            if (dest.length == 0) return $I.of(0);
+            $O chunk = read($I.of(dest.length));
+            if (!(chunk instanceof $BY)) return $I.of(0);
+            byte[] src = (($BY) chunk).data;
+            int n = src.length;
+            if (n > 0) System.arraycopy(src, 0, dest, 0, n);
+            return $I.of(n);
+        }
+        
         @Override
         public $O __getattr__(String name) {
             final BufferedIOBase self = this;
@@ -208,6 +242,9 @@ public class _io {
                     @Override public $O __call__($O... args) { 
                         return self.read1(args.length > 0 ? args[0] : $I.of(-1)); 
                     }
+                };
+                case "readinto": return new $O() {
+                    @Override public $O __call__($O... args) { return self.readinto(args[0]); }
                 };
                 case "write": return new $O() {
                     @Override public $O __call__($O... args) { return self.write(args[0]); }
@@ -407,6 +444,23 @@ public class _io {
                 byte[] buf = new byte[(int)remaining];
                 file.readFully(buf);
                 return $BY.of(buf);
+            } catch (IOException e) {
+                throw new $X.OSError(e.getMessage());
+            }
+        }
+        
+        @Override
+        public $O readinto($O buffer) {
+            checkReadable();
+            if (!(buffer instanceof $BY)) {
+                throw new $X.TypeError("readinto() argument must be a bytes-like object, not "
+                    + (buffer != null ? buffer.getClass().getSimpleName() : "NoneType"));
+            }
+            byte[] dest = (($BY) buffer).data;
+            if (dest.length == 0) return $I.of(0);
+            try {
+                int n = file.read(dest);
+                return $I.of(n < 0 ? 0 : n);
             } catch (IOException e) {
                 throw new $X.OSError(e.getMessage());
             }
@@ -925,6 +979,24 @@ public class _io {
         @Override
         public $O read1($O size) {
             return read(size);
+        }
+        
+        @Override
+        public $O readinto($O buffer) {
+            checkClosed();
+            if (!(buffer instanceof $BY)) {
+                throw new $X.TypeError("readinto() argument must be a bytes-like object, not "
+                    + (buffer != null ? buffer.getClass().getSimpleName() : "NoneType"));
+            }
+            byte[] dest = (($BY) buffer).data;
+            if (dest.length == 0) return $I.of(0);
+            int available = length - position;
+            int n = Math.min(dest.length, available);
+            if (n > 0) {
+                System.arraycopy(this.buffer, position, dest, 0, n);
+                position += n;
+            }
+            return $I.of(n);
         }
         
         @Override

@@ -497,6 +497,14 @@ public final class $G {
     }
     
     /**
+     * Delete (unbind) a global variable by name.
+     * Python semantics: del x removes the name from the global namespace.
+     */
+    public static void delGlobal(String name) {
+        globals.remove(name);
+    }
+    
+    /**
      * Import a module by name.
      * First checks if already loaded, then searches sys.path for the module.
      */

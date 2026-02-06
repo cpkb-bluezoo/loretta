@@ -420,19 +420,19 @@ void stackmap_record_frame(stack_map_table_t *smt, uint16_t offset)
                 }
             }
             
-            /* Also update stack - needed for exception handlers where
-             * the same offset may be recorded with different stack states */
-            free(f->stack);
-            f->stack_size = smt->current_stack_size;
-            if (f->stack_size > 0) {
+            /* Update stack. Exception handlers have one slot (the exception) on stack;
+             * if we merge with a path that has empty stack, keep the handler's stack
+             * so the verifier sees the correct frame for the exception edge. */
+            if (smt->current_stack_size > 0) {
+                free(f->stack);
+                f->stack_size = smt->current_stack_size;
                 f->stack = malloc(f->stack_size * sizeof(verification_type_t));
                 if (f->stack) {
                     memcpy(f->stack, smt->current_stack,
                            f->stack_size * sizeof(verification_type_t));
                 }
-            } else {
-                f->stack = NULL;
             }
+            /* else: keep existing f->stack / f->stack_size (e.g. exception handler) */
             return;
         }
     }
@@ -545,12 +545,19 @@ void stackmap_restore_state(stack_map_table_t *smt, stackmap_state_t *state)
         return;
     }
 
-    /* Restore locals */
-    smt->current_locals_count = state->num_locals;
+    /* Restore the first state->num_locals from saved state */
     if (state->num_locals > 0 && state->locals) {
         ensure_locals_capacity(smt, state->num_locals);
         memcpy(smt->current_locals, state->locals,
                state->num_locals * sizeof(verification_type_t));
+    }
+    /* Never shrink locals count: keep previous slots state->num_locals .. count-1
+     * unchanged so that later code reusing those slots (e.g. nested comprehensions
+     * reusing "a","b") has valid types and set_local(slot) does not fill with Top. */
+    if (state->num_locals < smt->current_locals_count) {
+        /* Keep current_locals_count; slots [state->num_locals, count) unchanged */
+    } else {
+        smt->current_locals_count = state->num_locals;
     }
 
     /* Restore stack */

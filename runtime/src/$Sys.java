@@ -1,4 +1,8 @@
 import java.io.File;
+import java.io.InputStreamReader;
+import java.io.BufferedReader;
+import java.io.PrintStream;
+import java.io.IOException;
 
 /**
  * $Sys - sys module implementation.
@@ -32,10 +36,10 @@ public final class $Sys {
     /** Platform identifier */
     public static final $S platform = $S.of("java");
     
-    /** Standard file descriptors */
-    public static $O stdin = $N.INSTANCE;  // TODO: implement properly
-    public static $O stdout = $N.INSTANCE; // TODO: implement properly
-    public static $O stderr = $N.INSTANCE; // TODO: implement properly
+    /** Standard file descriptors - wrap Java System.in/out/err */
+    public static $O stdin;
+    public static $O stdout;
+    public static $O stderr;
     
     /** Maximum recursion depth */
     public static $I maxsize = $I.of(Integer.MAX_VALUE);
@@ -68,6 +72,87 @@ public final class $Sys {
         
         // Initialize argv with empty list (will be set by main)
         argv.append($S.of("")); // argv[0] is script name
+
+        // Wrap Java standard streams as Python file-like objects
+        final BufferedReader stdinReader = new BufferedReader(new InputStreamReader(System.in));
+        stdin = new $O() {
+            @Override public $O __getattr__(String name) {
+                switch (name) {
+                    case "read":
+                        return new $O() {
+                            @Override public $O __call__($O... args) {
+                                try {
+                                    int size = args.length > 0 && args[0] instanceof $I
+                                        ? (int) Math.min(((($I)args[0]).value), Integer.MAX_VALUE) : -1;
+                                    if (size < 0) {
+                                        StringBuilder sb = new StringBuilder();
+                                        char[] buf = new char[4096];
+                                        int n;
+                                        while ((n = stdinReader.read(buf)) >= 0) sb.append(buf, 0, n);
+                                        return $S.of(sb.toString());
+                                    }
+                                    char[] buf = new char[size];
+                                    int n = stdinReader.read(buf, 0, size);
+                                    return $S.of(n <= 0 ? "" : new String(buf, 0, n));
+                                } catch (IOException e) { throw new $X("OSError", e.getMessage()); }
+                            }
+                        };
+                    case "readline":
+                        return new $O() {
+                            @Override public $O __call__($O... args) {
+                                try {
+                                    String line = stdinReader.readLine();
+                                    return line != null ? $S.of(line + "\n") : $S.of("");
+                                } catch (IOException e) { throw new $X("OSError", e.getMessage()); }
+                            }
+                        };
+                    default: return super.__getattr__(name);
+                }
+            }
+            @Override public $S __repr__() { return $S.of("<stdin>"); }
+        };
+
+        final PrintStream out = System.out;
+        stdout = new $O() {
+            @Override public $O __getattr__(String name) {
+                if ("write".equals(name)) {
+                    return new $O() {
+                        @Override public $O __call__($O... args) {
+                            if (args.length > 0) out.print(args[0].__str__().value);
+                            return $N.INSTANCE;
+                        }
+                    };
+                }
+                if ("flush".equals(name)) {
+                    return new $O() {
+                        @Override public $O __call__($O... args) { out.flush(); return $N.INSTANCE; }
+                    };
+                }
+                return super.__getattr__(name);
+            }
+            @Override public $S __repr__() { return $S.of("<stdout>"); }
+        };
+
+        final PrintStream err = System.err;
+        stderr = new $O() {
+            @Override public $O __getattr__(String name) {
+                if ("write".equals(name)) {
+                    return new $O() {
+                        @Override public $O __call__($O... args) {
+                            if (args.length > 0) err.print(args[0].__str__().value);
+                            return $N.INSTANCE;
+                        }
+                    };
+                }
+                if ("flush".equals(name)) {
+                    return new $O() {
+                        @Override public $O __call__($O... args) { err.flush(); return $N.INSTANCE; }
+                    };
+                }
+                return super.__getattr__(name);
+            }
+            @Override public $S __repr__() { return $S.of("<stderr>"); }
+        };
     }
     
     /**

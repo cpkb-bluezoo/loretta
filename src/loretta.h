@@ -773,6 +773,12 @@ struct ast_node
             slist_t *patterns;      /* For MATCH_SEQUENCE, MATCH_OR */
         } pattern;
 
+        /* AST_MATCH_MAPPING: {key: pattern, ...} */
+        struct {
+            slist_t *keys;      /* Key expressions (same length as patterns) */
+            slist_t *patterns;  /* Value patterns */
+        } mapping_match;
+
     } data;
 };
 
